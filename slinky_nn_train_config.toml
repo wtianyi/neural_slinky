@@ -1,0 +1,9 @@
+lr = 1e-3
+layer_width = 32
+num_layers = 5
+num_epochs = 200
+weight_decay = 0.000
+batch_size_train = 1000
+device = "cpu"
+datafiles = ["./data/SlinkyData_Angle_6_new_Douglas.mat"]
+datafiles_test = ["./data/SlinkyData_Angle_6_new_Douglas.mat"]
