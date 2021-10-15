@@ -5,7 +5,8 @@ import shutil
 import scipy.io as scio
 import numpy as np
 import torch
-import wandb
+# import wandb
+import pandas as pd
 from torch import nn
 from torch.utils import data
 
@@ -261,8 +262,8 @@ def make_tan(data):
     return new_data
 
 
-def preprocessing(data):
-    new_data = data.clone()
+def convert_xyz_to_l_gamma(data: torch.Tensor):
+    new_data = torch.empty(data.shape[0], 6, device=data.device)
 
     new_data[:, 0] = torch.sqrt(
         torch.square(data[:, 0] - data[:, 3]) + torch.square(data[:, 1] - data[:, 4])
@@ -280,7 +281,7 @@ def preprocessing(data):
     new_data[:, 5] = data[:, 8] - data[:, 5]  # gamma3
 
     # new_data (relative coordinates should be 6 dimensional)
-    new_data = new_data[:, :6]
+    # new_data = new_data[:, :6]
     return new_data
 
 
@@ -407,3 +408,25 @@ def seed_torch(seed=1029):
     torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
+
+
+def augment_z_xi(df):
+    result = pd.DataFrame(columns=["l1", "l2", "theta", "d_z_1", "d_xi_1", "d_z_2", "d_xi_2", "gamma1", "gamma3"])
+    result["l1"] = df["l1"]
+    result["l2"] = df["l2"]
+    result["theta"] = df["theta"]
+    result["gamma1"] = df["gamma1"]
+    result["gamma3"] = df["gamma3"]
+
+    phi_1 = 0.5 * (np.pi - df["theta"]) - df["gamma2"] - 0.5 * df["gamma1"]
+    phi_2 = 0.5 * (np.pi + df["theta"]) - df["gamma2"] + 0.5 * df["gamma3"]
+
+    result["phi_1"] = phi_1
+    result["phi_2"] = phi_2
+
+    result["d_z_1"] = df["l1"] * np.cos(phi_1)
+    result["d_xi_1"] = df["l1"] * np.sin(phi_1)
+
+    result["d_z_2"] = df["l2"] * np.cos(phi_2)
+    result["d_xi_2"] = df["l2"] * np.sin(phi_2)
+    return result
