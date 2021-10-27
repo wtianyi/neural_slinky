@@ -12,3 +12,4 @@ htmlcov
 wandb
 *.pt
 *.pkl
+*.ipynb
