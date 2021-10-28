@@ -91,12 +91,15 @@ if __name__ == "__main__":
         triplet_input
     )
 
+    cartesian_alpha_coords_single = coords_transform.transform_triplet_to_cartesian_alpha_single(
+        triplet_input
+    )
+
     cartesian_coords = coords_transform.transform_triplet_to_cartesian(
         triplet_input, [0.1, 0.1, 0.1]
     )
 
     # * Generate force by autograd
-    # ** For (x, z, alpha) coord
     douglas_model = DouglasModel(
         c_dxi=0.04111493612707057,
         c_dxi_sq=24.626752530556853,
@@ -104,6 +107,7 @@ if __name__ == "__main__":
         c_dphi_sq=0.036598450117485276,
     )
 
+    # ** For (x, z, alpha) coord
     cartesian_alpha_coords.requires_grad_(True)
     douglas_coords_alpha = coords_transform.transform_cartesian_alpha_to_douglas(
         cartesian_alpha_coords
@@ -115,6 +119,18 @@ if __name__ == "__main__":
         torch.ones_like(douglas_energy_alpha),
     )[0]
 
+    # *** For single pairs
+    cartesian_alpha_coords_single.requires_grad_(True)
+    douglas_coords_alpha_single = coords_transform.transform_cartesian_alpha_to_douglas_single(
+        cartesian_alpha_coords_single
+    )
+    douglas_energy_alpha_single = douglas_model(douglas_coords_alpha_single)
+    douglas_force_alpha_single = torch.autograd.grad(
+        douglas_energy_alpha_single,
+        cartesian_alpha_coords_single,
+        torch.ones_like(douglas_energy_alpha_single),
+    )[0]
+
     # ** For (x, z) coord
     cartesian_coords.requires_grad_(True)
     douglas_coords = coords_transform.transform_cartesian_to_douglas(cartesian_coords)
@@ -124,17 +140,21 @@ if __name__ == "__main__":
     )[0]
 
     # * Save douglas data
-    print("cartesian_coords.shape:", cartesian_coords.shape)
-    print("douglas_force.shape:", douglas_force.shape)
-
-    print("cartesian_alpha_coords.shape:", cartesian_alpha_coords.shape)
-    print("douglas_force_alpha.shape:", douglas_force_alpha.shape)
-    torch.save(
-        {
-            "cartesian_coords": cartesian_coords,
-            "cartesian_douglas_force": douglas_force,
-            "cartesian_alpha_coords": cartesian_alpha_coords,
-            "cartesian_alpha_douglas_force": douglas_force_alpha,
+    douglas_dataset = {
+        "coords": {
+            "cartesian": cartesian_coords,
+            "cartesian_alpha": cartesian_alpha_coords,
+            "cartesian_alpha_single": cartesian_alpha_coords_single.flatten(start_dim=-2),
         },
-        args.output,
+        "force": {
+            "cartesian": douglas_force,
+            "cartesian_alpha": douglas_force_alpha,
+            "cartesian_alpha_single": douglas_force_alpha_single.flatten(start_dim=-2),
+        },
+    }
+    for key, value in douglas_dataset.items():
+        print(f"================== {key} ==================")
+        [print("{:<10}: {}".format(k, value[k].shape)) for k in value]
+    torch.save(
+        douglas_dataset, args.output,
     )
