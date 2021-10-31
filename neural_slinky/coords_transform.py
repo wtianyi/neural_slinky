@@ -86,7 +86,7 @@ def signed_angle_2d(v1: torch.Tensor, v2: torch.Tensor):
 
 
 def compute_bisector(v1: torch.Tensor, v2: torch.Tensor) -> torch.Tensor:
-    """Compute the (un-normalized) angle bisector between two 2d vectors.
+    r"""Compute the (un-normalized) angle bisector between two 2d vectors.
 
     Let angle $\theta$ be the angle s.t. a counter-clockwise rotation of v1 by
     $\theta$ will align v1 with v2. The returned bisector will fall within
