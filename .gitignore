@@ -13,3 +13,4 @@ wandb
 *.pt
 *.pkl
 *.ipynb
+NeuralODE_Share2

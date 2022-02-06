@@ -4,43 +4,57 @@ from neural_slinky import coords_transform
 from neural_slinky.douglas_models import DouglasModel
 import pandas as pd
 
+import logging
 
-# import numpy as np
-# class DouglasModelTransform(torch.nn.Module):
-#     def __init__(self):
-#         super().__init__()
+douglas_model = DouglasModel(
+    c_dxi=0.04111493612707057,
+    c_dxi_sq=24.626752530556853,
+    c_dz_sq=77.00113656812572,
+    c_dphi_sq=0.036598450117485276,
+)
 
-#     def forward(self, cycle_triplet_coord):
-#         """
-#         Args:
-#             cycle_triplet_coord: input tensor of shape (N x 6). The columns are
-#                 (l1, l2, theta, gamma1, gamma2, gamma3)
-#         Returns:
-#             Douglas model's degrees of freedom of shape (N x 2 x 3).
-#             The last axis is (dxi, dz, dphi) where dphi is gamma1 or gamma3
-#         """
-#         l1 = cycle_triplet_coord[..., 0]
-#         l2 = cycle_triplet_coord[..., 1]
-#         theta = cycle_triplet_coord[..., 2]
-#         gamma1 = cycle_triplet_coord[..., 3]
-#         gamma2 = cycle_triplet_coord[..., 4]
-#         gamma3 = cycle_triplet_coord[..., 5]
 
-#         #         psi_1 = 0.5 * (np.pi - theta) - gamma2 - 0.5 * gamma1
-#         #         psi_2 = 0.5 * (np.pi + theta) - gamma2 + 0.5 * gamma3
-#         psi_1 = 0.5 * (np.pi - theta) + gamma2 - 0.5 * gamma1
-#         psi_2 = 0.5 * (np.pi + theta) + gamma2 - 0.5 * gamma3
+def calculate_douglas_force_cartesian(cartesian_coords: torch.Tensor):
+    cartesian_coords.requires_grad_(True)
+    douglas_coords = coords_transform.transform_cartesian_to_douglas(cartesian_coords)
+    douglas_energy = douglas_model(douglas_coords)
+    douglas_force = torch.autograd.grad(
+        douglas_energy, cartesian_coords, torch.ones_like(douglas_energy)
+    )[0]
+    return douglas_force
 
-#         dz_1 = l1 * torch.cos(psi_1)
-#         dxi_1 = l1 * torch.sin(psi_1)
 
-#         dz_2 = l2 * torch.cos(psi_2)
-#         dxi_2 = l2 * torch.sin(psi_2)
+def calculate_douglas_force_cartesian_alpha(cartesian_alpha_coords: torch.Tensor):
+    cartesian_alpha_coords.requires_grad_(True)
+    douglas_coords_alpha = coords_transform.transform_cartesian_alpha_to_douglas(
+        cartesian_alpha_coords
+    )
+    douglas_energy_alpha = douglas_model(douglas_coords_alpha)
+    douglas_force_alpha = torch.autograd.grad(
+        douglas_energy_alpha,
+        cartesian_alpha_coords,
+        torch.ones_like(douglas_energy_alpha),
+    )[0]
+    return douglas_force_alpha
 
-#         first_pair_dof = torch.stack([dxi_1, dz_1, gamma1], dim=-1)  # (N x 3)
-#         second_pair_dof = torch.stack([dxi_2, dz_2, gamma3], dim=-1)  # (N x 3)
-#         return torch.stack([first_pair_dof, second_pair_dof], dim=1)  # (N x 2 x 3)
 
+def calculate_douglas_force_cartesian_alpha_single(
+    cartesian_alpha_coords_single: torch.Tensor,
+):
+    cartesian_alpha_coords_single.requires_grad_(True)
+    douglas_coords_alpha_single = coords_transform.transform_cartesian_alpha_to_douglas_single(
+        cartesian_alpha_coords_single
+    )
+    douglas_energy_alpha_single = douglas_model(douglas_coords_alpha_single)
+    douglas_force_alpha_single = torch.autograd.grad(
+        douglas_energy_alpha_single,
+        cartesian_alpha_coords_single,
+        torch.ones_like(douglas_energy_alpha_single),
+    )[0]
+    return douglas_force_alpha_single
+
+
+logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     import argparse
@@ -53,7 +67,26 @@ if __name__ == "__main__":
         help="The original triplet data in feather format",
     )
     parser.add_argument("--output", type=str, required=True, help="The output path")
+
+    def parse_log_level(log_level: str) -> int:
+        if log_level == "none":
+            return logging.CRITICAL + 10
+        else:
+            numeric_level = getattr(logging, log_level.upper(), None)
+            if not isinstance(numeric_level, int):
+                raise ValueError("Invalid log level: {:s}".format(log_level))
+            return numeric_level
+
+    logging_levels = ["info", "warning", "debug", "error", "critical", "none"]
+    parser.add_argument("--log", type=parse_log_level, default=logging.INFO)
+
     args = parser.parse_args()
+
+    logger.setLevel(args.log)
+    logger_handler = logging.StreamHandler()
+    logger_handler.setLevel(args.log)
+    logger_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    logger.addHandler(logger_handler)
 
     # * Import triplet df
     df = pd.read_feather(args.triplet_data)
@@ -76,52 +109,63 @@ if __name__ == "__main__":
         triplet_input, [0.1, 0.1, 0.1]
     )
 
-    # * Generate force by autograd
-    douglas_model = DouglasModel(
-        c_dxi=0.04111493612707057,
-        c_dxi_sq=24.626752530556853,
-        c_dz_sq=77.00113656812572,
-        c_dphi_sq=0.036598450117485276,
+    logger.info(
+        "{0: <60} {1}".format(
+            "cartesian-alpha coords shape:", list(cartesian_alpha_coords.shape)
+        )
+    )
+    logger.info(
+        "{0: <60} {1}".format(
+            "cartesian-alpha coords (single cycle pair ver.) shape:",
+            list(cartesian_alpha_coords_single.shape),
+        )
+    )
+    logger.info(
+        "{0: <60} {1}".format(
+            "cartesian-only coords shape:", list(cartesian_coords.shape)
+        )
     )
 
+    # * Generate force by autograd
     # ** For (x, z, alpha) coord
-    cartesian_alpha_coords.requires_grad_(True)
-    douglas_coords_alpha = coords_transform.transform_cartesian_alpha_to_douglas(
+    douglas_force_alpha = calculate_douglas_force_cartesian_alpha(
         cartesian_alpha_coords
     )
-    douglas_energy_alpha = douglas_model(douglas_coords_alpha)
-    douglas_force_alpha = torch.autograd.grad(
-        douglas_energy_alpha,
-        cartesian_alpha_coords,
-        torch.ones_like(douglas_energy_alpha),
-    )[0]
 
     # *** For single pairs
-    cartesian_alpha_coords_single.requires_grad_(True)
-    douglas_coords_alpha_single = coords_transform.transform_cartesian_alpha_to_douglas_single(
+    douglas_force_alpha_single = calculate_douglas_force_cartesian_alpha_single(
         cartesian_alpha_coords_single
     )
-    douglas_energy_alpha_single = douglas_model(douglas_coords_alpha_single)
-    douglas_force_alpha_single = torch.autograd.grad(
-        douglas_energy_alpha_single,
-        cartesian_alpha_coords_single,
-        torch.ones_like(douglas_energy_alpha_single),
-    )[0]
 
     # ** For (x, z) coord
-    cartesian_coords.requires_grad_(True)
-    douglas_coords = coords_transform.transform_cartesian_to_douglas(cartesian_coords)
-    douglas_energy = douglas_model(douglas_coords)
-    douglas_force = torch.autograd.grad(
-        douglas_energy, cartesian_coords, torch.ones_like(douglas_energy)
-    )[0]
+    douglas_force = calculate_douglas_force_cartesian(cartesian_coords)
+
+    # logger.info(
+    #     "{0: <60} {1}".format(
+    #         "Cartesian-alpha Douglas coords shape:", list(douglas_coords_alpha.shape)
+    #     )
+    # )
+    # logger.info(
+    #     "{0: <60} {1}".format(
+    #         "Cartesian-alpha-single Douglas coords shape:",
+    #         list(douglas_coords_alpha_single.shape),
+    #     )
+    # )
+    # logger.info(
+    #     "{0: <60} {1}".format(
+    #         "Cartesian-only Douglas coords shape:",
+    #         list(douglas_coords.shape),
+    #     )
+    # )
 
     # * Save douglas data
     douglas_dataset = {
         "coords": {
             "cartesian": cartesian_coords,
             "cartesian_alpha": cartesian_alpha_coords,
-            "cartesian_alpha_single": cartesian_alpha_coords_single.flatten(start_dim=-2),
+            "cartesian_alpha_single": cartesian_alpha_coords_single.flatten(
+                start_dim=-2
+            ),
         },
         "force": {
             "cartesian": douglas_force,

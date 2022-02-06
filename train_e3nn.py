@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 import wandb
 from neural_slinky import e3nn_models
 
-device = "cpu"
+device = "cuda:4"
 
 # key = "cartesian_alpha_single"
 key = "cartesian"
@@ -73,6 +73,7 @@ model = e3nn_models.SlinkyForcePredictorCartesian(
     lmax=2,
     pool_nodes=False
 )
+model.to(device)
 print(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -101,6 +102,9 @@ for epoch in range(num_epochs):
         # node_pos = torch.stack([xy_1, xy_2], dim=-1).to(device)
         # bar_alpha = torch.cat([alpha_1, alpha_2], dim=-1).to(device)
 
+        cartesian = cartesian.to(device)
+        force = force.to(device)
+
         num_triplets = cartesian.shape[0]
         batch = torch.arange(num_triplets, device=device).view(-1, 1).repeat((1, 9)).flatten().long()
         edge_index = torch.tensor(
@@ -113,9 +117,9 @@ for epoch in range(num_epochs):
         ).repeat((num_triplets,1)) + torch.arange(num_triplets, device=device).mul_(9).repeat_interleave(8).view(-1,1)
         edge_index = edge_index.long()
 
-        edge_attr = torch.nn.functional.one_hot(torch.tensor([1,1,1,1,1,1,0,0]).repeat(num_triplets), num_classes=2).float()
+        edge_attr = torch.nn.functional.one_hot(torch.tensor([1,1,1,1,1,1,0,0], device=device).repeat(num_triplets), num_classes=2).float()
 
-        node_attr = torch.nn.functional.one_hot(torch.tensor([1,0,1]).repeat(3*num_triplets), num_classes=2).float()
+        node_attr = torch.nn.functional.one_hot(torch.tensor([1,0,1], device=device).repeat(3*num_triplets), num_classes=2).float()
 
         cartesian = cartesian.reshape(-1, 2)
         node_input = cartesian.new_ones(cartesian.shape[0], 1)
@@ -147,4 +151,8 @@ for epoch in range(num_epochs):
         #     print(p.grad)
 
         optimizer.step()
+    torch.save({
+        "state_dict": model.state_dict(),
+        "epoch": epoch
+    }, "e3nn_checkpoint.pt")
     print()

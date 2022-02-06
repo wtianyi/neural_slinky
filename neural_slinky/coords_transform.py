@@ -331,6 +331,65 @@ def transform_cartesian_alpha_to_triplet(cartesian_alpha_input: torch.Tensor):
     )  # (... x 2 x 3)
 
 
+def transform_cartesian_alpha_to_cartesian(
+    cartesian_alpha_input: torch.Tensor, bar_lengths: List[float]
+):
+    """
+    Args:
+        cartesian_alpha_input: input tensor of shape (... x 9). The columns are
+            (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2,
+            ...)
+        bar_length: A list of three numbers of the bar lengths
+    Returns:
+        Cartesian coordinates of all nodes in the 2D representation. Use the
+        center node of the first cycle in the triplet as the origin, and the
+        first link as the x axis.
+        In total there are 9 nodes, so the output shape is (... x 9 x 2), in
+        the order of (top_1, center_1, bottom_1, top_2, center_2, ...)
+    """
+    alpha_1 = cartesian_alpha_input[..., 2]
+    alpha_2 = cartesian_alpha_input[..., 5]
+    alpha_3 = cartesian_alpha_input[..., 8]
+
+    l1 = cartesian_alpha_input[..., 3:5] - cartesian_alpha_input[..., 0:2]
+    l2 = cartesian_alpha_input[..., 6:8] - cartesian_alpha_input[..., 3:5]
+
+    theta = signed_angle_2d(l2, l1)
+
+    center_1 = torch.stack([l1.detach() - l1, torch.zeros_like(l1)], dim=-1)
+    center_2 = torch.stack([l1, torch.zeros_like(l1)], dim=-1)
+    center_3 = center_2.clone()
+    center_3[..., 0] += l2 * torch.cos(theta)
+    center_3[..., 1] -= l2 * torch.sin(theta)
+
+    def cal_top_bottom(center, alpha, bar_length):
+        top = center.clone()
+        top[..., 0] += 0.5 * bar_length * torch.cos(alpha)
+        top[..., 1] += 0.5 * bar_length * torch.sin(alpha)
+        bottom = center.clone()
+        bottom[..., 0] -= 0.5 * bar_length * torch.cos(alpha)
+        bottom[..., 1] -= 0.5 * bar_length * torch.sin(alpha)
+        return top, bottom
+
+    top_1, bottom_1 = cal_top_bottom(center_1, alpha_1, bar_lengths[0])
+    top_2, bottom_2 = cal_top_bottom(center_2, alpha_2, bar_lengths[1])
+    top_3, bottom_3 = cal_top_bottom(center_3, alpha_3, bar_lengths[2])
+    return torch.stack(
+        [
+            top_1,
+            center_1,
+            bottom_1,
+            top_2,
+            center_2,
+            bottom_2,
+            top_3,
+            center_3,
+            bottom_3,
+        ],
+        dim=-2,
+    )
+
+
 def transform_triplet_to_cartesian_alpha_single(cycle_triplet_coord: torch.Tensor):
     """
     Args:
@@ -438,3 +497,18 @@ def transform_cartesian_alpha_to_douglas_single(cartesian_alpha_input: torch.Ten
 #     return torch.stack(
 #         [l1.norm(dim=-1), l2.norm(dim=-1), theta, gamma_1, gamma_2, gamma_3], dim=-1
 #     )  # (... x 2 x 3)
+
+# * Misc
+def group_into_triplets(slinky: torch.Tensor) -> torch.Tensor:
+    """Group (batches of) whole slinky coordinates to groups of triplets.
+
+    Args:
+        slinky (torch.Tensor): (... x $L$ x $M$) where $L$ is the number of cycles in a slinky, $M$ is the number of coordinates for each cycle
+
+    Returns:
+        torch.Tensor: (... x $L-2$ x 3 x $M$)
+    """
+    first = slinky[..., 0:-2, :]
+    second = slinky[..., 1:-1, :]
+    third = slinky[..., 2:, :]
+    return torch.stack([first, second, third], dim=-2)
