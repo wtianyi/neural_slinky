@@ -31,18 +31,10 @@ douglas_dataset_dict: Dict[str, Dict[str, torch.Tensor]] = torch.load(
 )
 
 input_tensor = (
-    douglas_dataset_dict["coords"][key]
-    .float()
-    .clone()
-    .detach()
-    .requires_grad_(False)
+    douglas_dataset_dict["coords"][key].float().clone().detach().requires_grad_(False)
 )
 output_tensor = (
-    douglas_dataset_dict["force"][key]
-    .float()
-    .clone()
-    .detach()
-    .requires_grad_(False)
+    douglas_dataset_dict["force"][key].float().clone().detach().requires_grad_(False)
 )
 
 print("input shape:", input_tensor.shape)
@@ -77,35 +69,50 @@ model = e3nn_models.SlinkyForcePredictorCartesian(
     mul=50,
     layers=3,
     lmax=5,
-    pool_nodes=False
+    pool_nodes=False,
 )
 model.to(device)
 print(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
+
 def make_data(cartesian: torch.Tensor):
     num_triplets = cartesian.shape[0]
-    batch = torch.arange(num_triplets, device=device).view(-1, 1).repeat((1, 9)).flatten().long()
+    batch = (
+        torch.arange(num_triplets, device=device)
+        .view(-1, 1)
+        .repeat((1, 9))
+        .flatten()
+        .long()
+    )
     edge_index = torch.tensor(
-        [
-            [1,0], [1,2],
-            [4,3], [4,5],
-            [7,6], [7,8],
-            [1,4], [4,7]
-        ], device=device
-    ).repeat((num_triplets,1)) + torch.arange(num_triplets, device=device).mul_(9).repeat_interleave(8).view(-1,1)
+        [[1, 0], [1, 2], [4, 3], [4, 5], [7, 6], [7, 8], [1, 4], [4, 7]], device=device
+    ).repeat((num_triplets, 1)) + torch.arange(num_triplets, device=device).mul_(
+        9
+    ).repeat_interleave(
+        8
+    ).view(
+        -1, 1
+    )
     edge_index = edge_index.long()
 
-    edge_attr = torch.nn.functional.one_hot(torch.tensor([1,1,1,1,1,1,0,0], device=device).repeat(num_triplets), num_classes=2).float()
+    edge_attr = torch.nn.functional.one_hot(
+        torch.tensor([1, 1, 1, 1, 1, 1, 0, 0], device=device).repeat(num_triplets),
+        num_classes=2,
+    ).float()
 
-    node_attr = torch.nn.functional.one_hot(torch.tensor([1,0,1], device=device).repeat(3*num_triplets), num_classes=2).float()
+    node_attr = torch.nn.functional.one_hot(
+        torch.tensor([1, 0, 1], device=device).repeat(3 * num_triplets), num_classes=2
+    ).float()
 
     cartesian = cartesian.reshape(-1, 2)
     node_input = cartesian.new_ones(cartesian.shape[0], 1)
     data = {
-        "pos": torch.cat([cartesian, cartesian.new_zeros(cartesian.shape[0], 1)], dim=-1),
-        "edge_src": edge_index[:,0],
-        "edge_dst": edge_index[:,1],
+        "pos": torch.cat(
+            [cartesian, cartesian.new_zeros(cartesian.shape[0], 1)], dim=-1
+        ),
+        "edge_src": edge_index[:, 0],
+        "edge_dst": edge_index[:, 1],
         "node_input": node_input,
         "batch": batch,
         "node_attr": node_attr,
@@ -133,7 +140,7 @@ for epoch in range(num_epochs):
         data = make_data(cartesian.detach())
         with torch.enable_grad():
             output = model(data)
-            mse = (force.view(-1,2) - output[:,0:2]).norm(dim=0)
+            mse = (force.view(-1, 2) - output[:, 0:2]).norm(dim=0)
             loss = mse.sum()
 
         sys.stdout.write(f"\rBatch loss: {loss.item()}")
@@ -142,8 +149,5 @@ for epoch in range(num_epochs):
         loss.backward()
 
         optimizer.step()
-    torch.save({
-        "state_dict": model.state_dict(),
-        "epoch": epoch
-    }, "e3nn_checkpoint.pt")
+    torch.save({"state_dict": model.state_dict(), "epoch": epoch}, "e3nn_checkpoint.pt")
     print()
