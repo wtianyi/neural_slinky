@@ -8,19 +8,22 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from sklearn.model_selection import train_test_split
 
+import numpy as np
+import pandas as pd
+
 import wandb
 from neural_slinky import e3nn_models
 from data import douglas_data
 
-device = "cuda:2"
+device = "cuda"
 
-from neural_slinky.utils import seed_torch
+from neural_slinky.utils import seed_torch, AverageMeter, plot_regression_scatter
 
 seed_torch(42)
 
 # key = "cartesian_alpha_single"
 key = "cartesian"
-batch_size = 64
+batch_size = 128
 num_epochs = 100
 lr = 1e-2
 weight_decay = 0
@@ -121,27 +124,105 @@ def make_data(cartesian: torch.Tensor):
     return data
 
 
+def evaluate(model, dataloader):
+    df_list = []
+    sample_ratio = 0.01
+    dim_names = []
+
+    for i in range(9):
+        dim_names.append(f"x_{i}")
+        dim_names.append(f"z_{i}")
+
+    mse_meter = AverageMeter()
+
+    with torch.no_grad():
+        for (
+            cartesian,
+            force,
+        ) in train_dataloader:  # cartesian_alpha.shape == (batch_size, 6)
+            cartesian = cartesian.to(device)
+            force = force.to(device)
+
+            data = make_data(cartesian.detach())
+            force_pred = model(data)[:, 0:2]
+            mse: torch.Tensor = (force.view(-1, 2) - force_pred).norm(dim=1).mean()
+
+            mse_meter.update(mse.item(), n=cartesian.shape[0])
+
+            force = force.cpu().numpy().reshape(-1, 18)
+            force_pred = force_pred.cpu().numpy().reshape(-1, 18)
+
+            dict_for_df = {}
+            for i, name in enumerate(dim_names):
+                dict_for_df[f"{name}_truth"] = force[:, i]
+                dict_for_df[f"{name}_pred"] = force_pred[:, i]
+            df = pd.DataFrame(dict_for_df).sample(frac=sample_ratio)
+            df_list.append(df)
+
+    df = pd.concat(df_list)
+
+    wandb.log(
+        {
+            "test/mse": mse_meter.val,
+        }
+    )
+
+    wandb.log(
+        {
+            f"test/residual_min/{name}": np.min(
+                df[f"{name}_pred"] - df[f"{name}_truth"]
+            )
+            for name in dim_names
+        }
+    )
+
+    wandb.log(
+        {
+            f"test/residual_max/{name}": np.max(
+                df[f"{name}_pred"] - df[f"{name}_truth"]
+            )
+            for name in dim_names
+        }
+    )
+
+    wandb.log(
+        {
+            f"test/scatters/{name}_scatter": plot_regression_scatter(
+                df, f"{name}_truth", f"{name}_pred", name
+            )
+            for name in dim_names
+        }
+    )
+
+
+import argparse
+
+parser = argparse.ArgumentParser(
+    "Pretraining a force predictor with Douglas synthetic data"
+)
+parser.add_argument("--log", action="store_true", dest="log")
+parser.add_argument("--no-log", action="store_false", dest="log")
+args = parser.parse_args()
+if args.log:
+    wandb.init(project="Slinky-pretrain-e3nn", config=args)
+else:
+    wandb.init(mode="disabled")
+
 for epoch in range(num_epochs):
     print(f"epoch {epoch}")
-    for (
-        cartesian,
-        force,
-    ) in train_dataloader:  # cartesian_alpha.shape == (batch_size, 6)
+    for i, (cartesian, force,) in enumerate(
+        train_dataloader
+    ):  # cartesian_alpha.shape == (batch_size, 6)
         cartesian = cartesian.to(device)
         force = force.to(device)
-
-        # computed_force = douglas_data.calculate_douglas_force_cartesian(cartesian)
-        # print("computed_force")
-        # print(computed_force)
-        # print("force")
-        # print(force)
-        # assert torch.allclose(computed_force, force)
 
         data = make_data(cartesian.detach())
         with torch.enable_grad():
             output = model(data)
-            mse = (force.view(-1, 2) - output[:, 0:2]).norm(dim=0)
-            loss = mse.sum()
+            mse = (force.view(-1, 2) - output[:, 0:2]).norm(dim=1)
+            loss = mse.mean()
+
+        wandb.log({"mse": loss})
 
         sys.stdout.write(f"\rBatch loss: {loss.item()}")
 
@@ -149,5 +230,12 @@ for epoch in range(num_epochs):
         loss.backward()
 
         optimizer.step()
+
+        if i % 1000 == 0:
+            evaluate(model, test_dataloader)
+
+    if epoch % 1 == 0:
+        evaluate(model, test_dataloader)
+
     torch.save({"state_dict": model.state_dict(), "epoch": epoch}, "e3nn_checkpoint.pt")
     print()

@@ -5,10 +5,14 @@ import shutil
 import scipy.io as scio
 import numpy as np
 import torch
+
 # import wandb
 import pandas as pd
 from torch import nn
 from torch.utils import data
+
+import plotly.graph_objects as go
+import plotly.express as px
 
 
 # defining functions
@@ -179,7 +183,7 @@ def make_dataloader(
     device="cpu",
     is_train: bool = True,
 ):
-    """construct a PyTorch data iterator. """
+    """construct a PyTorch data iterator."""
     data_tensors = [data.to(device) for data in data_tensors]
     dataset = data.TensorDataset(*data_tensors)
     return data.DataLoader(
@@ -411,7 +415,19 @@ def seed_torch(seed=1029):
 
 
 def augment_z_xi(df):
-    result = pd.DataFrame(columns=["l1", "l2", "theta", "d_z_1", "d_xi_1", "d_z_2", "d_xi_2", "gamma1", "gamma3"])
+    result = pd.DataFrame(
+        columns=[
+            "l1",
+            "l2",
+            "theta",
+            "d_z_1",
+            "d_xi_1",
+            "d_z_2",
+            "d_xi_2",
+            "gamma1",
+            "gamma3",
+        ]
+    )
     result["l1"] = df["l1"]
     result["l2"] = df["l2"]
     result["theta"] = df["theta"]
@@ -430,3 +446,55 @@ def augment_z_xi(df):
     result["d_z_2"] = df["l2"] * np.cos(phi_2)
     result["d_xi_2"] = df["l2"] * np.sin(phi_2)
     return result
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val: float = 0
+        self.avg: float = 0
+        self.sum: float = 0
+        self.count: int = 0
+
+    def update(self, val: float, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
+def plot_regression_scatter(
+    df: pd.DataFrame, truth_column: str, pred_column: str, title: str
+):
+    # fig = go.Figure()
+    fig = px.scatter(
+        df,
+        x=truth_column,
+        y=pred_column,
+        marginal_x="histogram",
+        marginal_y="histogram",
+        title=title,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df[truth_column],
+            y=df[truth_column],
+            mode="lines",
+            line={"dash": "dot", "color": "#000"},
+        )
+    )
+    max_value = np.max(np.abs(df[truth_column]))
+    fig.update_xaxes(
+        range=[-1.5 * max_value, 1.5 * max_value],  # sets the range of xaxis
+        # constrain="domain",  # meanwhile compresses the xaxis by decreasing its "domain"
+    )
+    fig.update_yaxes(
+        range=[-1.5 * max_value, 1.5 * max_value],  # sets the range of yaxis
+        scaleanchor="x",
+        scaleratio=1,
+    )
+    return fig
