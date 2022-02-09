@@ -22,7 +22,7 @@ from neural_slinky import emlp_models
 
 device = "cuda"
 
-from neural_slinky.utils import get_model_device, seed_torch
+from neural_slinky.utils import get_model_device, seed_torch, plot_regression_scatter
 
 seed_torch(42)
 
@@ -74,33 +74,6 @@ print(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
 
-def plot_regression_scatter(
-    df: pd.DataFrame, truth_column: str, pred_column: str, title: str
-):
-    # fig = go.Figure()
-    fig = px.scatter(
-        df,
-        x=truth_column,
-        y=pred_column,
-        marginal_x="histogram",
-        marginal_y="histogram",
-        title=title,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=df[truth_column],
-            y=df[truth_column],
-            mode="lines",
-            line={"dash": "dot", "color": "#000"},
-        )
-    )
-    fig.update_yaxes(
-        scaleanchor="x",
-        scaleratio=1,
-    )
-    return fig
-
-
 def evaluate(model, dataloader):
     df_list = []
     sample_ratio = 0.1
@@ -133,7 +106,9 @@ def evaluate(model, dataloader):
     )
     wandb.log(
         {
-            f"{name}_scatter": plot_regression_scatter(df, f"{name}_truth", f"{name}_pred", name)
+            f"test/scatters/{name}": plot_regression_scatter(
+                df, f"{name}_truth", f"{name}_pred", name
+            )
             for name in pos_name_list + rot_name_list
         }
     )
