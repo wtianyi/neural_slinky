@@ -104,6 +104,24 @@ def evaluate(model, dataloader):
             "test/mse": mse,
         }
     )
+
+    wandb.log(
+        {
+            f"test/residual_min/{name}": np.min(
+                df[f"{name}_pred"] - df[f"{name}_truth"]
+            )
+            for name in pos_name_list + rot_name_list
+        }
+    )
+
+    wandb.log(
+        {
+            f"test/residual_max/{name}": np.max(
+                df[f"{name}_pred"] - df[f"{name}_truth"]
+            )
+            for name in pos_name_list + rot_name_list
+        }
+    )
     wandb.log(
         {
             f"test/scatters/{name}": plot_regression_scatter(
