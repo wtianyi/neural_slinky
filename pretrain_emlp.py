@@ -22,7 +22,7 @@ from neural_slinky import emlp_models
 
 device = "cuda"
 
-from neural_slinky.utils import get_model_device, seed_torch, plot_regression_scatter
+from neural_slinky.utils import AverageMeter, get_model_device, seed_torch, plot_regression_scatter
 
 seed_torch(42)
 
@@ -72,13 +72,17 @@ model = emlp_models.SlinkyForcePredictorEMLP(layers=3)
 model.to(device)
 print(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, factor=0.1, patience=2)
 
 
 def evaluate(model, dataloader):
     df_list = []
-    sample_ratio = 0.1
+    sample_ratio = 0.01
     pos_name_list = ["x_1", "z_1", "x_2", "z_2", "x_3", "z_3"]
     rot_name_list = ["a_1", "a_2", "a_3"]
+    mse_meter = AverageMeter()
+    pos_force_mse_meter = AverageMeter()
+    rot_force_mse_meter = AverageMeter()
     with torch.no_grad():
         for (cartesian_alpha, force) in dataloader:
             cartesian_alpha = cartesian_alpha.to(device)
@@ -88,6 +92,12 @@ def evaluate(model, dataloader):
             pos_force_mse = (pos_force - force_pred[..., 3:]).norm(dim=-1).mean()
             rot_force_mse = (rot_force - force_pred[..., :3]).norm(dim=-1).mean()
             mse = pos_force_mse + rot_force_mse
+
+            n_data = force.shape[0]
+            pos_force_mse_meter.update(pos_force_mse.item(), n=n_data)
+            rot_force_mse_meter.update(rot_force_mse.item(), n=n_data)
+            mse_meter.update(mse.item(), n=n_data)
+
             force = force.cpu().numpy()
             force_pred = force_pred.cpu().numpy()
             dict_for_df = {}
@@ -96,12 +106,13 @@ def evaluate(model, dataloader):
                 dict_for_df[f"{name}_pred"] = force_pred[:, i]
             df = pd.DataFrame(dict_for_df).sample(frac=sample_ratio)
             df_list.append(df)
+
     df = pd.concat(df_list)
     wandb.log(
         {
-            "test/pos_force_mse": pos_force_mse,
-            "test/rot_force_mse": rot_force_mse,
-            "test/mse": mse,
+            "test/pos_force_mse": pos_force_mse_meter.val,
+            "test/rot_force_mse": rot_force_mse_meter.val,
+            "test/mse": mse_meter.val,
         }
     )
 
@@ -141,13 +152,14 @@ parser.add_argument("--log", action="store_true", dest="log")
 parser.add_argument("--no-log", action="store_false", dest="log")
 args = parser.parse_args()
 if args.log:
-    wandb.init(project="Slinky-pretrain", config=args)
+    wandb.init(project="Slinky-pretrain-emlp", config=args)
 else:
     wandb.init(mode="disabled")
 
 rot_mse_scale = 10
 
 for epoch in range(num_epochs):
+    mse_meter = AverageMeter()
     print(f"epoch {epoch}")
     for (
         cartesian_alpha,
@@ -157,6 +169,7 @@ for epoch in range(num_epochs):
         force = force.to(device)
         pos_force, rot_force = force[..., 3:], force[..., :3]
         # force = force.to(device)
+        n_data = cartesian_alpha.shape[0]
 
         with torch.enable_grad():
             # output = model(data)
@@ -166,6 +179,7 @@ for epoch in range(num_epochs):
             pos_force_mse = (pos_force - force_pred[..., 3:]).norm(dim=0).mean()
             loss = pos_force_mse + rot_mse_scale * rot_force_mse
             mse = pos_force_mse + rot_force_mse
+            mse_meter.update(mse.item(), n_data)
             wandb.log(
                 {
                     "pos_force_mse": pos_force_mse,
@@ -183,6 +197,7 @@ for epoch in range(num_epochs):
 
     if epoch % 1 == 0:
         evaluate(model, test_dataloader)
+    scheduler.step(mse_meter.val)
 
-    torch.save({"state_dict": model.state_dict(), "epoch": epoch}, "e3nn_checkpoint.pt")
+    torch.save({"state_dict": model.state_dict(), "epoch": epoch}, "emlp_checkpoint.pt")
     print()

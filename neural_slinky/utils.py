@@ -488,12 +488,12 @@ def plot_regression_scatter(
         )
     )
     max_value = np.max(np.abs(df[truth_column]))
-    fig.update_xaxes(
-        range=[-1.5 * max_value, 1.5 * max_value],  # sets the range of xaxis
+    fig['layout']['xaxis'].update(
+        range=[-1.2 * max_value, 1.2 * max_value],  # sets the range of xaxis
         # constrain="domain",  # meanwhile compresses the xaxis by decreasing its "domain"
     )
-    fig.update_yaxes(
-        range=[-1.5 * max_value, 1.5 * max_value],  # sets the range of yaxis
+    fig['layout']['yaxis'].update(
+        range=[-1.2 * max_value, 1.2 * max_value],  # sets the range of yaxis
         scaleanchor="x",
         scaleratio=1,
     )
