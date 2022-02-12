@@ -252,6 +252,51 @@ def chiral_transformation_xz(data):
     return new_data
 
 
+def chiral_transformation_x_douglas(data):
+    new_data = torch.empty_like(data)
+    new_data[..., 0] = -data[..., 0]
+    new_data[..., 2] = -data[..., 2]
+    new_data[..., 3] = -data[..., 3]
+    new_data[..., 5] = -data[..., 5]
+    return new_data
+
+
+def chiral_transformation_z_douglas(data):
+    new_data = torch.empty_like(data)
+    new_data[..., 0] = data[..., 3]
+    new_data[..., 1] = -data[..., 4]
+    new_data[..., 2] = data[..., 5]
+    new_data[..., 3] = data[..., 0]
+    new_data[..., 4] = -data[..., 1]
+    new_data[..., 5] = data[..., 2]
+    return new_data
+
+
+def chiral_transformation_xz_douglas(data):
+    new_data = torch.empty_like(data)
+    new_data[..., 0] = -data[..., 3]
+    new_data[..., 1] = -data[..., 4]
+    new_data[..., 2] = -data[..., 5]
+    new_data[..., 3] = -data[..., 0]
+    new_data[..., 4] = -data[..., 1]
+    new_data[..., 5] = -data[..., 2]
+    # new_data = chiral_transformation_x_douglas(data)
+    # new_data = chiral_transformation_z_douglas(new_data)
+    return new_data
+
+
+def chiral_augment_douglas(data):
+    return torch.stack(
+        [
+            data,
+            chiral_transformation_x_douglas(data),
+            chiral_transformation_z_douglas(data),
+            chiral_transformation_xz_douglas(data),
+        ],
+        dim=0,
+    )
+
+
 def make_tan(data):
     # data is a 6-dim input vector
     # the output is a 6-dim vector, as the 180 degrees rotation of input data
@@ -488,13 +533,17 @@ def plot_regression_scatter(
         )
     )
     max_value = np.max(np.abs(df[truth_column]))
-    fig['layout']['xaxis'].update(
+    fig["layout"]["xaxis"].update(
         range=[-1.2 * max_value, 1.2 * max_value],  # sets the range of xaxis
         # constrain="domain",  # meanwhile compresses the xaxis by decreasing its "domain"
     )
-    fig['layout']['yaxis'].update(
+    fig["layout"]["yaxis"].update(
         range=[-1.2 * max_value, 1.2 * max_value],  # sets the range of yaxis
         scaleanchor="x",
         scaleratio=1,
     )
     return fig
+
+
+def num_parameters(model: nn.Module) -> int:
+    return sum([w.numel() for w in model.parameters()])

@@ -3,6 +3,10 @@ from typing import List
 import torch
 import numpy as np
 
+"""For Douglas representation, the xi is the component of a link that's normal
+to the angular bisector, and z is component that's along the angular bisector
+"""
+
 # * Cartesian
 def transform_triplet_to_cartesian(
     cycle_triplet_coord: torch.Tensor, bar_lengths: List[float]
@@ -303,6 +307,49 @@ def transform_cartesian_alpha_to_douglas(cartesian_alpha_input: torch.Tensor):
     return torch.stack([first_pair, second_pair], dim=-2)  # (... x 2 x 3)
 
 
+def transform_cartesian_alpha_to_douglas_v2(cartesian_alpha_input: torch.Tensor):
+    """
+    Args:
+        cartesian_alpha_input: input tensor of shape (... x 9). The columns are
+            (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2,
+            ...)
+    Returns:
+        Douglas model's degrees of freedom of shape (... x 2 x 3).
+        The last axis is (dxi, dz, dphi)
+    """
+    alpha_1 = cartesian_alpha_input[..., 2]
+    alpha_2 = cartesian_alpha_input[..., 5]
+    alpha_3 = cartesian_alpha_input[..., 8]
+
+    l1 = cartesian_alpha_input[..., 3:5] - cartesian_alpha_input[..., 0:2]
+    l2 = cartesian_alpha_input[..., 6:8] - cartesian_alpha_input[..., 3:5]
+
+    # theta = signed_angle_2d(l2, l1)
+
+    # l1_norm = l1.norm(dim=-1)
+    # l2_norm = l2.norm(dim=-1)
+
+    psi_1 = 0.5 * (alpha_1 + alpha_2)
+    psi_2 = 0.5 * (alpha_2 + alpha_3)
+
+    sin_1 = torch.sin(psi_1)
+    cos_1 = torch.cos(psi_1)
+    dxi_1 = dot(l1, torch.stack([cos_1, sin_1], dim=-1))
+    dz_1 = dot(l1, torch.stack([sin_1, -cos_1], dim=-1))
+
+    sin_2 = torch.sin(psi_2)
+    cos_2 = torch.cos(psi_2)
+    dxi_2 = dot(l2, torch.stack([cos_2, sin_2], dim=-1))
+    dz_2 = dot(l2, torch.stack([sin_2, -cos_2], dim=-1))
+
+    dphi_1 = alpha_2 - alpha_1
+    dphi_2 = alpha_3 - alpha_2
+
+    first_pair = torch.stack([dxi_1, dz_1, dphi_1], dim=-1)
+    second_pair = torch.stack([dxi_2, dz_2, dphi_2], dim=-1)
+    return torch.stack([first_pair, second_pair], dim=-2)  # (... x 2 x 3)
+
+
 def transform_cartesian_alpha_to_triplet(cartesian_alpha_input: torch.Tensor):
     """
     Args:
@@ -390,6 +437,58 @@ def transform_cartesian_alpha_to_cartesian(
     )
 
 
+def transform_cartesian_alpha_to_cartesian_v2(
+    cartesian_alpha_input: torch.Tensor, bar_lengths: List[float]
+):
+    """
+    Args:
+        cartesian_alpha_input: input tensor of shape (... x 9). The columns are
+            (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2,
+            ...)
+        bar_length: A list of three numbers of the bar lengths
+    Returns:
+        Cartesian coordinates of all nodes in the 2D representation. Use the
+        center node of the first cycle in the triplet as the origin, and the
+        first link as the x axis.
+        In total there are 9 nodes, so the output shape is (... x 9 x 2), in
+        the order of (top_1, center_1, bottom_1, top_2, center_2, ...)
+    """
+    alpha_1 = cartesian_alpha_input[..., 2]
+    alpha_2 = cartesian_alpha_input[..., 5]
+    alpha_3 = cartesian_alpha_input[..., 8]
+
+    center_1 = cartesian_alpha_input[..., [0, 1]]
+    center_2 = cartesian_alpha_input[..., [3, 4]]
+    center_3 = cartesian_alpha_input[..., [6, 7]]
+
+    def cal_top_bottom(center, alpha, bar_length):
+        top = center.clone()
+        top[..., 0] += 0.5 * bar_length * torch.cos(alpha)
+        top[..., 1] += 0.5 * bar_length * torch.sin(alpha)
+        bottom = center.clone()
+        bottom[..., 0] -= 0.5 * bar_length * torch.cos(alpha)
+        bottom[..., 1] -= 0.5 * bar_length * torch.sin(alpha)
+        return top, bottom
+
+    top_1, bottom_1 = cal_top_bottom(center_1, alpha_1, bar_lengths[0])
+    top_2, bottom_2 = cal_top_bottom(center_2, alpha_2, bar_lengths[1])
+    top_3, bottom_3 = cal_top_bottom(center_3, alpha_3, bar_lengths[2])
+    return torch.stack(
+        [
+            top_1,
+            center_1,
+            bottom_1,
+            top_2,
+            center_2,
+            bottom_2,
+            top_3,
+            center_3,
+            bottom_3,
+        ],
+        dim=-2,
+    )
+
+
 def transform_triplet_to_cartesian_alpha_single(cycle_triplet_coord: torch.Tensor):
     """
     Args:
@@ -441,7 +540,10 @@ def transform_triplet_to_cartesian_alpha_single(cycle_triplet_coord: torch.Tenso
         dim=-2,
     )
 
-    return torch.stack([first_pair, second_pair], dim=-3,)
+    return torch.stack(
+        [first_pair, second_pair],
+        dim=-3,
+    )
 
 
 def transform_cartesian_alpha_to_douglas_single(cartesian_alpha_input: torch.Tensor):

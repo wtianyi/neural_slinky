@@ -1,3 +1,4 @@
+from ast import Slice
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -81,23 +82,15 @@ class DenseBlock(nn.Module):
         for i in range(NumLayer):
             layer.append(
                 nn.Sequential(
-                    # nn.BatchNorm1d(NeuronsPerLayer * i + NeuronsPerLayer),
-                    nn.Linear(NeuronsPerLayer * i + NeuronsPerLayer, NeuronsPerLayer),
-                    nn.Softplus(),  # , Square()
+                nn.Linear(NeuronsPerLayer * i + NeuronsPerLayer, NeuronsPerLayer), 
+                nn.Softplus(beta=1e1)
                 )
             )
-            # nn.Linear(NeuronsPerLayer * i + NeuronsPerLayer, NeuronsPerLayer)), nn.Tanh()
         self.net = nn.Sequential(*layer)
-
     def forward(self, X):
         for blk in self.net:
             Y = blk(X)
-            # Concatenate the input and output of each block on the channel
-            # dimension
             X = torch.cat((X, Y), dim=-1)
-            # X = torch.cat((X, Y), dim=1)
-        # print("inside dense block")
-        # print(X.size())
         return X
 
 
@@ -255,7 +248,7 @@ class MLPPureWithBatchnorm(nn.Module):
         return out1 + out2 + out3 + out4
 
 
-class ChiralInvariantWrapper(nn.Module):
+class TripletChiralInvariantWrapper(nn.Module):
     def __init__(self, backbone: nn.Module) -> None:
         super().__init__()
         self.backbone = backbone
@@ -271,11 +264,27 @@ class ChiralInvariantWrapper(nn.Module):
         return output
 
 
+class DouglasChiralInvariantWrapper(nn.Module):
+    def __init__(self, backbone: nn.Module) -> None:
+        super().__init__()
+        self.backbone = backbone
+
+    def forward(self, input_tensor: torch.Tensor, **kwargs):
+        output = self.backbone(input_tensor, **kwargs)
+        for transform in [
+            chiral_transformation_x_douglas,
+            chiral_transformation_z_douglas,
+            chiral_transformation_xz_douglas,
+        ]:
+            output = output + self.backbone(transform(input_tensor), **kwargs)
+        return output
+
+
 class AutogradOutputWrapper(nn.Module):
     def __init__(
         self,
         backbone: nn.Module,
-        output_mask: Union[None, int, slice, torch.Tensor, List, Tuple] = None,
+        output_mask: Union[int, slice, torch.Tensor, List, Tuple] = slice(None),
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -291,7 +300,7 @@ class AutogradOutputWrapper(nn.Module):
                 grad_outputs=torch.ones_like(backbone_output),
                 create_graph=True,
                 retain_graph=True,
-            )
+            )[0]
         return grad[self.output_mask]
 
 
