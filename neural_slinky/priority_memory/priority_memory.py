@@ -68,7 +68,7 @@ class FastPriorReplayBuffer:
         self.b_increment_per_episode = (1 - initial_b) / total_episode
         self._len = None
 
-    def append(self, features: Union[List, Tuple, ndarray], prior: [float, int, None]=None):
+    def append(self, features: Union[List, Tuple, ndarray], prior: Union[float, int, None]=None):
         """
         Append a row of value to the buffer.
 
@@ -229,7 +229,7 @@ class SegmentTree:
         for a in arr:
             self.put(a)
 
-    def put(self, node, priority: [float, None]=None) -> int:
+    def put(self, node, priority: Union[float, None]=None) -> int:
         """
 
         :param node:
@@ -310,7 +310,7 @@ class SegmentTree:
     def _sample_batch(self, batch_size) -> List:
         return [self.sample()[1].dat for _ in range(batch_size)]
 
-    def _sample_from_unknown_buff(self, slices: (list, None), data: (list, None), prob: (list, None), batch_size: int):
+    def _sample_from_unknown_buff(self, slices: Union[list, None], data: Union[list, None], prob: Union[list, None], batch_size: int):
         while not self.unknown_buff.empty():
             idx, node = self.unknown_buff.get_nowait()
             slices.append(idx)
@@ -322,9 +322,9 @@ class SegmentTree:
         return batch_size
 
     def _sample_lowest_p(self,
-                         slices: (list, None),
-                         data: (list, None),
-                         prob: (list, None),
+                         slices: Union[list, None],
+                         data: Union[list, None],
+                         prob: Union[list, None],
                          batch_size: int):
         """
         Sometime when the buffer size is too large, the value may be out dated,
@@ -381,7 +381,7 @@ class SegmentTree:
         slices = np.array(slices)
         return slices, data, prob
 
-    def _sample_node_batch(self, batch_size) -> List[Node]:
+    def _sample_node_batch(self, batch_size: int) -> List[Node]:
         return [self.sample()[1] for _ in range(batch_size)]
 
     def sample(self) -> Tuple[int, Union[Node, float]]:
