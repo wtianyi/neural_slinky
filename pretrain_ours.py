@@ -14,6 +14,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 
+from tqdm.auto import tqdm
+
 import wandb
 
 # from neural_slinky import e3nn_models
@@ -31,6 +33,21 @@ from neural_slinky.utils import (
     seed_torch,
     plot_regression_scatter,
 )
+
+import argparse
+
+parser = argparse.ArgumentParser(
+    "Pretraining a force predictor with Douglas synthetic data"
+)
+parser.add_argument("--log", action="store_true", dest="log")
+parser.add_argument("--no-log", action="store_false", dest="log")
+args = parser.parse_args()
+if args.log:
+    wandb.init(project="Slinky-pretrain-ours", config=args)
+else:
+    wandb.init(mode="disabled")
+
+rot_mse_scale = 10
 
 seed_torch(42)
 
@@ -104,9 +121,10 @@ backbone_model = BackboneModel()
 model = ns_models.AutogradOutputWrapper(
     ns_models.DouglasChiralInvariantWrapper(backbone_model)
 )
-# model = ns_models.DouglasChiralInvariantWrapper(backbone_model)
+
 print(model)
-print(num_parameters(model))
+print("Number of parameters:", num_parameters(model))
+
 model.to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -181,43 +199,32 @@ def evaluate(model, dataloader):
         }
     )
 
+from neural_slinky import priority_memory
+pr_buffer = priority_memory.PrioritizedReplayBuffer(size=100000, alpha=0.1, beta=0.1)
+pr_scheduler = priority_memory.PrioritizedReplayBetaScheduler(pr_buf=pr_buffer, T_max=10)
 
-import argparse
-
-parser = argparse.ArgumentParser(
-    "Pretraining a force predictor with Douglas synthetic data"
-)
-parser.add_argument("--log", action="store_true", dest="log")
-parser.add_argument("--no-log", action="store_false", dest="log")
-args = parser.parse_args()
-if args.log:
-    wandb.init(project="Slinky-pretrain-ours", config=args)
-else:
-    wandb.init(mode="disabled")
-
-rot_mse_scale = 10
-
-for epoch in range(num_epochs):
+for epoch in tqdm(range(num_epochs)):
     mse_meter = AverageMeter()
     print(f"epoch {epoch}")
     for (
         cartesian_alpha,
         force,
-    ) in train_dataloader:  # cartesian_alpha.shape == (batch_size, 6)
-        cartesian_alpha = cartesian_alpha.to(device)
-        force = force.to(device)
-        pos_force, rot_force = force[..., pos_inds], force[..., rot_inds]
+    ) in tqdm(train_dataloader):  # cartesian_alpha.shape == (batch_size, 6)
+        cartesian_alpha_cuda = cartesian_alpha.to(device)
+        force_cuda = force.to(device)
+        pos_force, rot_force = force_cuda[..., pos_inds], force_cuda[..., rot_inds]
         # force = force.to(device)
-        n_data = cartesian_alpha.shape[0]
+        n_data = cartesian_alpha_cuda.shape[0]
 
         with torch.enable_grad():
             # output = model(data)
-            force_pred = model(cartesian_alpha)
+            force_pred = model(cartesian_alpha_cuda)
             # mse = (force.view(-1,2) - output[:,0:2]).norm(dim=0)
-            rot_force_mse = (rot_force - force_pred[..., rot_inds]).norm(dim=0).mean()
-            pos_force_mse = (pos_force - force_pred[..., pos_inds]).norm(dim=0).mean()
+            rot_force_mse = ((rot_force - force_pred[..., rot_inds]) ** 2).mean(dim=1)
+            pos_force_mse = ((pos_force - force_pred[..., pos_inds]) ** 2).mean(dim=1)
             loss = pos_force_mse + rot_mse_scale * rot_force_mse
             mse = pos_force_mse + rot_force_mse
+            pr_buffer
             mse_meter.update(mse.item(), n_data)
             wandb.log(
                 {

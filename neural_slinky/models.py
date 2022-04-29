@@ -91,7 +91,7 @@ class DenseBlock(nn.Module):
         for blk in self.net:
             Y = blk(X)
             X = torch.cat((X, Y), dim=-1)
-        return X
+        return Y
 
 
 class MLPPureSimple(nn.Module):

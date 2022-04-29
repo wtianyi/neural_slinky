@@ -9,8 +9,8 @@ import torch
 from copy import deepcopy
 from numbers import Number
 
-from .batch import Batch, _parse_value, _alloc_by_keys_diff, _create_value
-from .segtree import SegmentTree
+from priority_memory.batch import Batch, _parse_value, _alloc_by_keys_diff, _create_value
+from priority_memory.segtree import SegmentTree
 
 
 def to_numpy(x: Any) -> Union[Batch, np.ndarray]:
@@ -85,7 +85,7 @@ class PrioritizedReplayBuffer:
 
     def reset(self) -> None:
         """Clear all the data in replay buffer."""
-        self.last_index = np.array([0])
+        # self.last_index = np.array([0])
         self._index = self._size = 0
 
     def init_weight(self, index: Union[int, np.ndarray]) -> None:
@@ -121,7 +121,8 @@ class PrioritizedReplayBuffer:
         Returns:
             index_to_be_modified
         """
-        self.last_index[0] = ptr = self._index
+        # self.last_index[0] = ptr = self._index
+        ptr = self._index
         self._size = min(self._size + 1, self.maxsize)
         self._index = (self._index + 1) % self.maxsize
         return ptr
@@ -153,6 +154,41 @@ class PrioritizedReplayBuffer:
             self._meta[ptr] = batch
 
         self.init_weight(ptr)
+        return ptr
+
+    def add_batch(self, batch: Batch) -> np.ndarray:
+        """Add a batch of data in to replay buffer
+
+        Args:
+            batch (Batch): The input data batch
+
+        Returns:
+            np.ndarry: The indices of the added data
+        """
+        ptrs = self._add_indices(len(batch))
+        try:
+            self._meta[ptrs] = batch
+        except ValueError:
+            if self._meta.is_empty():
+                self._meta = _create_value(batch, self.maxsize, False)
+            else:
+                _alloc_by_keys_diff(self._meta, batch, self.maxsize, False)
+            self._meta[ptrs] = batch
+        self.init_weight(ptrs)
+        return ptrs
+
+    def _add_indices(self, size: int) -> np.ndarray:
+        """Return the indices for multiple in-coming data.
+
+        Args:
+            size (int): the number of in-coming data
+
+        Returns:
+            np.ndarray: Indices to be modified
+        """
+        ptr = (self._index + np.arange(size)) % self.maxsize
+        self._size = min(self._size + size, self.maxsize)
+        self._index = (self._index + size) % self.maxsize
         return ptr
 
     def sample_indices(self, batch_size: int) -> np.ndarray:
@@ -187,7 +223,16 @@ class PrioritizedReplayBuffer:
         # important sampling weight calculation
         # original formula: ((p_j/p_sum*N)**(-beta))/((p_min/p_sum*N)**(-beta))
         # simplified formula: (p_j/p_min)**(-beta)
-        return (self.weight[index] / self._min_prio) ** (-self._beta)
+        if isinstance(index, slice):  # change slice to np array
+            # buffer[:] will get all available data
+            indices = (
+                self.sample_indices(0)
+                if index == slice(None)
+                else self._indices[: len(self)][index]
+            )
+        else:
+            indices = index
+        return (self.weight[indices] / self._min_prio) ** (-self._beta)
 
     def update_priority(
         self, index: np.ndarray, new_weight: Union[np.ndarray, torch.Tensor]
