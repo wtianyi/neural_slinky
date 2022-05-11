@@ -10,7 +10,7 @@ from torch.utils import data
 class TestTrojectoryDataset(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        with open("VanDerPol.pkl", "rb") as f:
+        with open("tests/data/VanDerPol.pkl", "rb") as f:
             vdp_data = pickle.load(f)
         cls.data = vdp_data[0]["data"]
         cls.default_input_length = 1
@@ -52,7 +52,7 @@ class TestTrojectoryDataset(unittest.TestCase):
             for batch_size in [1, 3, 5]:
                 dataloader = trajectory_dataset.create_dataloader(
                     dataset,
-                    sampler_cls=trajectory_dataset.TrajectoryDataset.StratifiedClipSampler,
+                    sampler_cls=trajectory_dataset.StratifiedClipSampler,
                     batch_size=batch_size,
                     drop_last=True
                 )

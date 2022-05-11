@@ -17,6 +17,7 @@ import plotly.express as px
 
 # defining functions
 from typing import Union, List, Dict, Sequence
+import itertools
 
 
 def load_slinky_mat_data(
@@ -547,3 +548,165 @@ def plot_regression_scatter(
 
 def num_parameters(model: nn.Module) -> int:
     return sum([w.numel() for w in model.parameters()])
+
+
+def animate_2d_slinky_trajectories(trajectories: torch.Tensor, dt, animation_slice=100):
+    """Plot a plotly animation of the motion of a DER
+
+    Args:
+        trajectory (torch.Tensor): 2D slinky trajectory (n_trajectories x n_frames x num_cycles x 3)
+        dt (float): The time step during simulation
+    """
+    simulation_steps = trajectories.shape[1]
+    interval = int(simulation_steps / animation_slice)
+    trajectories = trajectories[:, ::interval]  # downsampling
+    # node_coords = trajectories
+    node_coords = (
+        trajectories.clone().detach().cpu().transpose(1, 0).numpy()
+    )  # transpose the time axis to the first dim
+    # num_frames = len(node_coords)
+    # node_coords = [t.clone().cpu().numpy() for t in trajectories]
+    bar_len = 0.02
+
+    def calculate_bar_df(x, y, a, l=1):
+        a = a.reshape(-1, 1)
+        x = x.reshape(-1, 1)
+        y = y.reshape(-1, 1)
+        dx = -0.5 * l * np.sin(a)
+        dy = 0.5 * l * np.cos(a)
+        xx = np.hstack([x + dx, x - dx, np.ones_like(x) * np.nan]).ravel()
+        yy = np.hstack([y + dy, y - dy, np.ones_like(y) * np.nan]).ravel()
+        return pd.DataFrame({"x": xx, "y": yy})
+
+    def make_frame_data(coords):
+        frame_data = []
+        if len(coords.shape) == 2:
+            coords = coords[None, :]
+        if len(coords.shape) != 3:
+            raise ValueError(f"`coords` must have 2 or 3 dims. got {coords.shape=}")
+        colors = px.colors.qualitative.Plotly
+        for coord, color in zip(coords, itertools.cycle(colors)):
+            x = coord[:, 0]
+            y = coord[:, 1]
+            a = coord[:, 2]
+            bar_df = calculate_bar_df(x, y, a, bar_len)
+            frame_data.extend(
+                [
+                    {
+                        "type": "scatter",
+                        "x": x,
+                        "y": y,
+                        "line": {"color": color, "width": 2},
+                        # "marker": {"size": 4, "color": "red"},
+                        "mode": "lines",
+                    },
+                    {
+                        "type": "scatter",
+                        "x": bar_df["x"],
+                        "y": bar_df["y"],
+                        "line": {"color": color, "width": 1},
+                    },
+                ]
+            )
+        return frame_data
+
+    data = make_frame_data(node_coords[0])
+    # axis = dict(
+    #     showbackground=True,
+    #     backgroundcolor="rgb(230, 230,230)",
+    #     gridcolor="rgb(255, 255, 255)",
+    #     zerolinecolor="rgb(255, 255, 255)",
+    # )
+    frames = []
+    for k, coords in enumerate(node_coords):
+        frame_data = make_frame_data(coords)
+        frames.append(
+            {
+                "data": frame_data,
+                # "traces": [0, 1],
+                "name": f"frame {k}",
+            }
+        )
+
+    sliders = [
+        dict(
+            steps=[
+                dict(
+                    method="animate",  # Sets the Plotly method to be called when the
+                    # slider value is changed.
+                    args=[
+                        [
+                            "frame {}".format(k)
+                        ],  # Sets the arguments values to be passed to
+                        # the Plotly method set in method on slide
+                        dict(
+                            mode="immediate",
+                            frame=dict(duration=50, redraw=False),
+                            transition=dict(duration=0),
+                        ),
+                    ],
+                    label="{:.2f}".format(k * interval * dt),
+                )
+                for k in range(animation_slice)
+            ],
+            transition=dict(duration=0),
+            x=0,  # slider starting position
+            y=0,
+            currentvalue=dict(
+                font=dict(size=12), prefix="Time: ", visible=True, xanchor="center"
+            ),
+            len=1.0,
+        )  # slider length)
+    ]
+
+    x_all = node_coords[..., 0]
+    xmax, xmin = x_all.max(), x_all.min()
+    xrange = xmax - xmin
+    y_all = node_coords[..., 1]
+    ymax, ymin = y_all.max(), y_all.min()
+    yrange = ymax - ymin
+    margin = 0.05
+
+    layout = dict(
+        title="Animating a 2D Slinky",
+        autosize=True,
+        # width=600,
+        # height=600,
+        showlegend=False,
+        yaxis=dict(
+            scaleanchor="x",
+            scaleratio=1,
+        ),
+        xaxis_range=[xmin - margin * xrange, xmax + margin * xrange],
+        yaxis_range=[ymin - margin * yrange, ymax + margin * yrange],
+        updatemenus=[
+            dict(
+                type="buttons",
+                showactive=False,
+                y=0,
+                x=1.15,
+                xanchor="right",
+                yanchor="top",
+                pad=dict(t=0, r=10),
+                buttons=[
+                    dict(
+                        label="Play",
+                        method="animate",
+                        args=[
+                            None,
+                            dict(
+                                frame=dict(duration=20, redraw=True),
+                                transition=dict(duration=0),
+                                fromcurrent=True,
+                                mode="immediate",
+                            ),
+                        ],
+                    )
+                ],
+            )
+        ],
+        sliders=sliders,
+    )
+    fig = go.Figure(data=data, layout=layout, frames=frames)
+    # fig.show(renderer="notebook_connected")
+    return fig

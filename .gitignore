@@ -9,8 +9,11 @@ build
 htmlcov
 
 .vscode
+.env
 wandb
 *.pt
 *.pkl
 *.ipynb
 NeuralODE_Share2
+*.ckpt
+*.pth

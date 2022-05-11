@@ -1,4 +1,4 @@
-from typing import Iterator, Optional, Sequence
+from typing import Iterator, Optional, Sequence, Union
 
 import numpy as np
 from torch.utils import data
@@ -52,17 +52,24 @@ class TrajectoryDataset(data.Dataset[data.dataset.T_co]):
         self._calculate_ind_mapping()
 
     @staticmethod
-    def _make_range_indices(begin: np.ndarray, end: np.ndarray):
+    def _make_range_indices(
+        begin: Union[int, np.integer, np.ndarray],
+        end: Union[int, np.integer, np.ndarray],
+    ):
+        if isinstance(begin, (int, np.integer)):
+            return np.arange(begin, end)
         return np.stack([np.arange(a, b) for a, b in zip(begin, end)])
 
     def __getitem__(self, index):
-        if isinstance(index, int):
-            index = [index]  # to preserve the temporal axis even if it has size 1
+        # if isinstance(index, int):
+        #     index = [index]  # to preserve the temporal axis even if it has size 1
         start_inds = self._ind_map[index]
         input_end_inds = start_inds + self._input_length
         target_end_inds = input_end_inds + self._target_length
-        input = self._data[self._make_range_indices(start_inds, input_end_inds)]
-        target = self._data[self._make_range_indices(input_end_inds, target_end_inds)]
+        input = self._data[self._make_range_indices(start_inds, input_end_inds), ...]
+        target = self._data[
+            self._make_range_indices(input_end_inds, target_end_inds), ...
+        ]
         return input, target
 
     def _calculate_ind_mapping(self) -> int:
@@ -84,33 +91,57 @@ class TrajectoryDataset(data.Dataset[data.dataset.T_co]):
             end_ind = self._extern_start_inds[i + 1]
             self._ind_map[start_ind:end_ind] += self._internal_start_inds[i] - start_ind
 
-    class StratifiedClipSampler(data.Sampler[int]):
-        def __init__(
-            self, data_source: "TrajectoryDataset", num_samples: Optional[int] = None
-        ) -> None:
-            self.data_source = data_source
-            self._num_samples = num_samples
+    def to_dataloader(
+        self, batch_size: int, sampler: str, drop_last: bool = True, **kwargs
+    ):
+        """Get dataloader from dataset.
 
-        def _sample_traj_idx(self, n: int = 1) -> np.ndarray:
-            return np.random.randint(self.data_source.num_trajectories, size=n)
+        Args:
+            batch_size (int): batch size
+            sampler (str): The type of sampler. Can be "sequential", "random" or
+                           "stratified"
+            drop_last (bool, optional): drop_last. Defaults to True.
 
-        def _sample_clip_from_traj(self, traj_idx: np.ndarray):
-            in_traj_ind = np.random.randint(self.data_source._valid_len_list[traj_idx])
-            return in_traj_ind + self.data_source._extern_start_inds[traj_idx]
+        Raises:
+            ValueError: Unknown sampler type
 
-        def __iter__(self) -> Iterator[int]:
-            if self._num_samples:
-                for _ in range(self._num_samples // 32):
-                    yield from self._sample_clip_from_traj(self._sample_traj_idx(32))
-                yield from self._sample_clip_from_traj(
-                    self._sample_traj_idx(self._num_samples % 32)
-                )
-            else:
-                while True:
-                    yield from self._sample_clip_from_traj(self._sample_traj_idx(32))
+        Returns:
+            data.DataLoader: dataloader
+        """
+        if sampler == "random":
+            sampler_cls = data.RandomSampler
+        elif sampler == "stratified":
+            sampler_cls = StratifiedClipSampler
+        elif sampler == "sequential":
+            sampler_cls = data.SequentialSampler
+        else:
+            raise ValueError(f"Unknown sampler type: {sampler}")
+        return create_dataloader(
+            self, batch_size, drop_last, sampler_cls=sampler_cls, **kwargs
+        )
 
-        def __len__(self) -> int:
-            return self._num_samples
+
+class StratifiedClipSampler(data.RandomSampler):
+    def __init__(
+        self,
+        data_source: TrajectoryDataset,
+        num_samples: Optional[int] = None,
+    ) -> None:
+        super(StratifiedClipSampler, self).__init__(data_source, True, num_samples)
+
+    def _sample_traj_idx(self, n: int = 1) -> np.ndarray:
+        return np.random.randint(self.data_source.num_trajectories, size=n)
+
+    def _sample_clip_from_traj(self, traj_idx: np.ndarray):
+        in_traj_ind = np.random.randint(self.data_source._valid_len_list[traj_idx])
+        return in_traj_ind + self.data_source._extern_start_inds[traj_idx]
+
+    def __iter__(self) -> Iterator[int]:
+        for _ in range(self.num_samples // 32):
+            yield from self._sample_clip_from_traj(self._sample_traj_idx(32))
+        yield from self._sample_clip_from_traj(
+            self._sample_traj_idx(self.num_samples % 32)
+        )
 
 
 def create_dataloader(
@@ -124,7 +155,10 @@ def create_dataloader(
     return data.DataLoader(
         dataset,
         sampler=data.BatchSampler(
-            sampler_cls(dataset), batch_size=batch_size, drop_last=drop_last, **kw_args
+            sampler_cls(dataset),
+            batch_size=batch_size,
+            drop_last=drop_last,
         ),
         batch_size=None,
+        **kw_args,
     )

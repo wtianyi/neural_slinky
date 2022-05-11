@@ -1,0 +1,3 @@
+[submodule "slinky-is-sliding"]
+	path = slinky-is-sliding
+	url = git@github.com:StructuresComp/slinky-is-sliding.git
