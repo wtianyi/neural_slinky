@@ -17,3 +17,5 @@ wandb
 NeuralODE_Share2
 *.ckpt
 *.pth
+lightning_logs
+animation_tmp.html

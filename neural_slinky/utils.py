@@ -710,3 +710,24 @@ def animate_2d_slinky_trajectories(trajectories: torch.Tensor, dt, animation_sli
     fig = go.Figure(data=data, layout=layout, frames=frames)
     # fig.show(renderer="notebook_connected")
     return fig
+
+
+def boolean_flag(parser, name: str, default: bool = False, help: str = None) -> None:
+    """Add a boolean flag to argparse parser.
+
+    Parameters
+    ----------
+    parser (:obj:`argparse.ArgumentParser`):
+        parser to add the flag to
+    name (:obj:`str`):
+        --<name> will enable the flag, while --no-<name> will disable it
+    default (:obj:`bool`):
+        default value of the flag
+    help (:obj:`str`):
+        help string for the flag
+    """
+    dest = name.replace("-", "_")
+    parser.add_argument(
+        "--" + name, action="store_true", default=default, dest=dest, help=help
+    )
+    parser.add_argument("--no-" + name, action="store_false", dest=dest)
