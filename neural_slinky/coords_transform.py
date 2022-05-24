@@ -360,22 +360,26 @@ def transform_cartesian_alpha_to_triplet(cartesian_alpha_input: torch.Tensor):
         The (... x 6) shaped triplet coordinates with columns (l1, l2, theta,
         gamma1, gamma2, gamma3)
     """
-    alpha_1 = cartesian_alpha_input[..., 2]
-    alpha_2 = cartesian_alpha_input[..., 5]
-    alpha_3 = cartesian_alpha_input[..., 8]
-
     l1 = cartesian_alpha_input[..., 3:5] - cartesian_alpha_input[..., 0:2]
     l2 = cartesian_alpha_input[..., 6:8] - cartesian_alpha_input[..., 3:5]
+    offset_angle = torch.atan2(l1[...,1], l1[...,0]).detach()
+
+    alpha_1 = cartesian_alpha_input[..., 2] - offset_angle
+    alpha_2 = cartesian_alpha_input[..., 5] - offset_angle
+    alpha_3 = cartesian_alpha_input[..., 8] - offset_angle
 
     theta = signed_angle_2d(l2, l1)
 
-    gamma_2 = alpha_2 - 0.5 * (np.pi - theta)
+    gamma_2 = alpha_2 - 0.5 * (torch.pi - theta)
+    # print(gamma_2)
+    gamma_2 = (gamma_2 + torch.pi / 2) % torch.pi - torch.pi / 2
+    # print(gamma_2)
     gamma_1 = alpha_2 - alpha_1
     gamma_3 = alpha_2 - alpha_3
 
     return torch.stack(
         [l1.norm(dim=-1), l2.norm(dim=-1), theta, gamma_1, gamma_2, gamma_3], dim=-1
-    )  # (... x 2 x 3)
+    )  # (... x 6)
 
 
 def transform_cartesian_alpha_to_cartesian(
