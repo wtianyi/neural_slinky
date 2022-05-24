@@ -3,10 +3,11 @@ lr: 0.001
 weight_decay: 0.0
 min_epochs: 50
 seed: 0
-devices: [2]
+# devices: [2]
 incr_freq: 1
 init_length: 2
 max_length: 70
 perturb: 0
 kinetic_reg: 0.0
-grad_clip: 0
+gradient_clip_val: 0
+n_cycles_loss: 20

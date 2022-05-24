@@ -68,7 +68,7 @@ val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
 test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
 
 
-model = emlp_models.SlinkyForcePredictorEMLP(layers=3)
+model = emlp_models.SlinkyForcePredictorEMLP(num_layers=3)
 model.to(device)
 print(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)

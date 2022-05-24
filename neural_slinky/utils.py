@@ -515,7 +515,7 @@ class AverageMeter(object):
 
 def plot_regression_scatter(
     df: pd.DataFrame, truth_column: str, pred_column: str, title: str
-):
+) -> "go.Figure":
     # fig = go.Figure()
     fig = px.scatter(
         df,

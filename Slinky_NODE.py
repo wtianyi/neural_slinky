@@ -21,36 +21,7 @@ from neural_slinky.utils import (
 from priority_memory import batch
 from slinky import func as node_f
 
-parser = configargparse.ArgumentParser(
-    default_config_files=["node_default_config.yaml"],
-    config_file_parser_class=configargparse.YAMLConfigFileParser,
-)
-
-parser.add_argument(
-    "--log", action="store_true", default=False, help="Whether to enable the logger"
-)
-parser.add_argument("--batch_size", type=int, help="Batch size")
-parser.add_argument("--shuffle", type=bool, help="Whether to shuffle the data")
-parser.add_argument("--lr", type=float, help="The learning rate of the meta steps")
-parser.add_argument("--grad_clip", type=float, default=0, help="Gradient clipping")
-parser.add_argument("--weight_decay", type=float, help="Weight decay of optimizer")
-parser.add_argument("--min_epochs", type=int, help="Min training epochs")
-parser.add_argument("--seed", type=int, default=0, help="The random seed")
-parser.add_argument("--devices", action="append", type=int, help="Torch device")
-parser.add_argument(
-    "--incr_freq", type=int, help="Clip length increment frequency in epochs"
-)
-parser.add_argument("--max_length", type=int, help="Max clip length")
-parser.add_argument("--init_length", type=int, help="Initial clip length")
-parser.add_argument(
-    "--perturb", type=float, default=0, help="Gaussian perturbation augmentation scale"
-)
-parser.add_argument(
-    "--kinetic_reg", type=float, help="The kinetic regularization coefficient"
-)
-parser.add_argument("--name", default="NODE", type=str, help="Run name")
-
-args = parser.parse_args()
+# from neural_slinky import emlp_models
 
 
 def read_data():
@@ -86,9 +57,6 @@ def read_data():
         y_scale,
         v_scale,
     )
-
-
-slinky_data, num_cycles, y_scale, v_scale = read_data()
 
 
 class SlinkyDataModule(pl.LightningDataModule):
@@ -156,24 +124,100 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         self,
         dim_per_layer: int,
         n_layers: int,
-        kinetic_regularization: float = 0,
-        *args,
+        kinetic_reg: float = 0,
+        n_cycles_loss: int = 20,
+        net_type: str = "ESNN",
+        lr: float = 1e-3,
+        weight_decay: float = 0,
+        odeint_method: str = "dopri5",
+        pretrained_net: Optional[str] = None,
         **kwargs,
     ) -> None:
-        super().__init__(*args, **kwargs)
-        self.net = node_f.ODEFunc(NeuronsPerLayer=dim_per_layer, NumLayer=n_layers)
+        super().__init__()
+        self.save_hyperparameters()
+        if net_type == "ESNN":
+            self.net = node_f.ODEFunc(
+                NeuronsPerLayer=dim_per_layer, NumLayer=n_layers, Boundaries=(1, 1)
+            )
+        elif net_type == "ESNN2":
+            self.net = node_f.ODEFunc2(
+                NeuronsPerLayer=dim_per_layer, NumLayer=n_layers, Boundaries=(1, 1)
+            )
+        elif net_type == "EMLP":
+            self.net = emlp_models.SlinkyForceODEFunc(
+                num_layers=n_layers, boundaries=(1, 1)
+            )
+
+        if pretrained_net:
+            self._load_pretrained_net(self.net, pretrained_net)
+
         self.model = node_f.ODEPhys(self.net)
         self.register_buffer("feat_weights", torch.tensor([1e2, 1e2, 1, 1e2, 1e2, 1]))
         self.atol = 1e-4
         self.rtol = 1e-4
-        self.n_cycles_loss = 20
-        self.kinetic_regularization = kinetic_regularization
+        self.n_cycles_loss = n_cycles_loss
+        self.kinetic_reg = kinetic_reg
         self.mse = torch.nn.MSELoss()
+
+    @staticmethod
+    def add_argparse_args(parent_parser):
+        parser = parent_parser.add_argument_group("SlinkyTrajectoryRegressor")
+        parser.add_argument("--dim_per_layer", type=int, default=32)
+        parser.add_argument("--n_layers", type=int, default=5)
+        parser.add_argument(
+            "--kinetic_reg",
+            type=float,
+            default=0,
+            help="The kinetic regularization coefficient",
+        )
+        parser.add_argument(
+            "--n_cycles_loss", type=int, help="Number of cycles to calculate loss for"
+        )
+        parser.add_argument(
+            "--net_type",
+            default="ESNN",
+            choices=["ESNN", "EMLP", "ESNN2"],
+            type=str,
+            help="The type of force prediction network",
+        )
+        parser.add_argument(
+            "--odeint_method",
+            default="dopri5",
+            choices=[
+                "dopri8",
+                "dopri5",
+                "bosh3",
+                "fehlberg2",
+                "adaptive_heun",
+                "euler",
+                "midpoint",
+                "rk4",
+                "explicit_adams",
+                "implicit_adams",
+                "fixed_adams",
+                "scipy_solver",
+            ],
+            type=str,
+            help="The odeint method",
+        )
+        parser.add_argument(
+            "--lr", type=float, help="The learning rate of the meta steps"
+        )
+        parser.add_argument(
+            "--weight_decay", type=float, help="Weight decay of optimizer"
+        )
+        parser.add_argument(
+            "--pretrained_net",
+            type=str,
+            default=None,
+            help="Pretrained core network state dict path",
+        )
+        return parent_parser
 
     # def _kinetic_function(self, t, x):
     #     f = self.model(t, x)
     #     return (f**2).sum()
-        # return (f**2).sum(dim=tuple(range(1, len(f.shape) + 1)))
+    # return (f**2).sum(dim=tuple(range(1, len(f.shape) + 1)))
 
     def _regularizer_augmented_model(
         self, t: torch.Tensor, aug_x: Tuple[torch.Tensor, torch.Tensor]
@@ -181,32 +225,36 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         x = aug_x[0]
         # e = aug_x[1]
         f = self.model(t, x)
-        return (f, (f**2).sum())
+        return (f, (f**2).mean(dim=0).sum())
 
-    def _solve_dynamics(self, start, t, method):
-        if self.kinetic_regularization:
+    def _solve_dynamics(self, start, t: torch.Tensor, method):
+        t = t[0]  # TODO: this only applies to evenly-spaced trajectories
+        if self.kinetic_reg:
             start = (start, torch.tensor(0).type_as(start))
-            output, regularization = self.odeint(
+            output, regularization = self._odeint(
                 start,
                 t,
                 method,
                 fun=self._regularizer_augmented_model,
                 adjoint_params=tuple(self.model.parameters()),
             )
-            regularization = regularization[-1]
+            duration = len(t)  # .detach_()
+            # print(f"{t=}")
+            # if duration == 0:
+            #     duration = 1
+            regularization = regularization[-1] / duration
         else:
             regularization = 0
-            output = self.odeint(start, t, method, fun=self.model)
+            output = self._odeint(start, t, method, fun=self.model)
         output = output[1:].transpose(0, 1)
         return output, regularization
 
     def criterion(self, x, y):
         return torch.mean(((x - y) * self.feat_weights) ** 2)
 
-    def odeint(
+    def _odeint(
         self, start: torch.Tensor, t: torch.Tensor, method: str, fun: Callable, **kwargs
     ):
-        t = t[0]  # TODO: this only applies to evenly-spaced trajectories
         pred_y = odeint(
             fun, start, t, atol=self.atol, rtol=self.rtol, method=method, **kwargs
         )
@@ -219,18 +267,21 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         input: torch.Tensor,
         t: torch.Tensor,
         true_output: Optional[torch.Tensor] = None,
-        method: str = "dopri5",
+        # method: str = "dopri5",
+        method: str = None,
         regularization: bool = True,
-        # method: str = "rk4",
     ):
         start = input[:, 0]
+
+        if method is None:
+            method = self.hparams.odeint_method
 
         output, regularization = self._solve_dynamics(start, t, method)
         # print(f"{output.shape=}")
         # print(f"{true_output.shape=}")
 
         if true_output is None:
-            return 0, output
+            return {"loss": 0, "output": output, "mse": 0, "kinetic_regularization": 0}
         else:
             select_cycles = torch.randperm(input.shape[-2])[: self.n_cycles_loss]
             mse = self.mse(output, true_output)
@@ -238,7 +289,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
                 output[..., select_cycles, :], true_output[..., select_cycles, :]
             )
             if regularization:
-                loss = loss + self.kinetic_regularization * regularization
+                loss = loss + self.kinetic_reg * regularization
         return {
             "loss": loss,
             "output": output,
@@ -260,7 +311,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         kinetic_regularization = result["kinetic_regularization"]
         self.log("train_loss", loss, prog_bar=True, logger=True)
         self.log("train_mse", mse, prog_bar=True, logger=True)
-        if self.kinetic_regularization:
+        if self.kinetic_reg:
             self.log(
                 "kinetic_regularization",
                 kinetic_regularization,
@@ -291,38 +342,16 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
     def configure_optimizers(self):
         # return torch.optim.AdamW(self.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         return torch.optim.Adam(
-            self.parameters(), lr=args.lr, weight_decay=args.weight_decay
+            self.parameters(),
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
         )
 
-
-pl.seed_everything(args.seed)
-training_cutoff_ratio = 0.8
-training_cutoff = int(len(slinky_data) * training_cutoff_ratio)
-# training_cutoff = 65
-
-data_module = SlinkyDataModule(
-    [slinky_data[:training_cutoff]],
-    [slinky_data[training_cutoff:]],
-    # [slinky_data[:training_cutoff]],
-    input_length=1,
-    target_length=args.init_length,
-    test_length=args.init_length,
-    batch_size=args.batch_size,
-    perturb=args.perturb,  # .01
-)
-data_module.setup()
-
-checkpoint_callback = ModelCheckpoint(
-    dirpath=os.path.join("checkpoints", args.name),
-    # filename="best-checkpoint",
-    save_top_k=1,
-    save_last=True,
-    verbose=True,
-    monitor="val_mse",
-    mode="min",
-)
-
-early_stopping_callback = EarlyStopping(monitor="val_mse", patience=4)
+    @staticmethod
+    def _load_pretrained_net(net: torch.nn.Module, pretrained_checkpoint: str):
+        state_dict = torch.load(pretrained_checkpoint)
+        net.load_state_dict(state_dict)
+        return net
 
 
 class ClipLengthStepper(pl.Callback):
@@ -341,77 +370,162 @@ class ClipLengthStepper(pl.Callback):
             and trainer.train_dataloader.dataset.datasets.target_length < self.max_len
         ):
             trainer.train_dataloader.dataset.datasets.target_length += 1
-            trainer.val_dataloaders[0].dataset.target_length += 1
+            # trainer.val_dataloaders[0].dataset.target_length += 1
             # trainer.test_dataloaders[0].dataset.target_length += 1
         return
 
 
-if args.log:
-    logger = WandbLogger(args.name)
-else:
-    logger = WandbLogger(args.name, mode="disabled")
+if __name__ == "__main__":
+    parser = configargparse.ArgumentParser(
+        default_config_files=["node_default_config.yaml"],
+        config_file_parser_class=configargparse.YAMLConfigFileParser,
+    )
 
-wandb.config.update(args)
+    parser.add_argument(
+        "--log", action="store_true", default=False, help="Whether to enable the logger"
+    )
+    parser.add_argument("--batch_size", type=int, help="Batch size")
+    parser.add_argument("--shuffle", type=bool, help="Whether to shuffle the data")
+    # parser.add_argument("--grad_clip", type=float, default=0, help="Gradient clipping")
+    # parser.add_argument("--min_epochs", type=int, help="Min training epochs")
+    parser.add_argument("--seed", type=int, default=0, help="The random seed")
+    # parser.add_argument("--devices", action="append", type=int, help="Torch device")
+    parser.add_argument(
+        "--incr_freq", type=int, help="Clip length increment frequency in epochs"
+    )
+    parser.add_argument("--max_length", type=int, help="Max clip length")
+    parser.add_argument("--init_length", type=int, help="Initial clip length")
+    parser.add_argument(
+        "--perturb",
+        type=float,
+        default=0,
+        help="Gaussian perturbation augmentation scale",
+    )
 
-trainer = pl.Trainer(
-    gpus=args.devices,
-    logger=logger,
-    enable_checkpointing=True,
-    # max_epochs=N_EPOCHS,
-    min_epochs=args.min_epochs,
-    callbacks=[
-        checkpoint_callback,
-        early_stopping_callback,
-        ClipLengthStepper(freq=args.incr_freq, max_len=args.max_length),
-    ],
-    log_every_n_steps=10,
-    gradient_clip_val=args.grad_clip,
-    reload_dataloaders_every_n_epochs=1,
-    # clipping gradients is a hyperparameter and important to prevent divergance
-    # of the gradient for recurrent neural networks
-    # gradient_clip_val=0.1,
-    # profiler="advanced",
-    # progress_bar_refresh_rate=1,
-    # strategy="dp",
-    # fast_dev_run=True
-)
+    parser.add_argument("--name", default="NODE", type=str, help="Run name")
 
-model = SlinkyTrajectoryRegressor(
-    dim_per_layer=32, n_layers=5, kinetic_regularization=args.kinetic_reg
-)
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path")
+    parser.add_argument(
+        "--test_only",
+        action="store_true",
+        default=False,
+        help="Only evaluate the model. (Not very meaningful if not loading a trained checkpoint)",
+    )
 
-trainer.fit(model=model, datamodule=data_module)
+    slinky_data, num_cycles, y_scale, v_scale = read_data()
 
-start_point = slinky_data[0]["state"][None, None, :]
-# print(start_point)
-# sys.exit()
-model.eval()
-evaluate_time = torch.from_numpy(slinky_data["time"]).to(get_model_device(model))
+    SlinkyTrajectoryRegressor.add_argparse_args(parser)
+    pl.Trainer.add_argparse_args(parser)
+    args = parser.parse_args()
 
-true_trajectory = (
-    slinky_data["state"].detach().reshape(-1, num_cycles, 2, 3)[1:, :, 0, :]
-)
-# print(f"{true_trajectory.shape=}")
+    pl.seed_everything(args.seed)
+    training_cutoff_ratio = 0.8
+    training_cutoff = int(len(slinky_data) * training_cutoff_ratio)
+    # training_cutoff = 65
 
-# print(f"{start_point.shape=}")
-result = model.forward(start_point, evaluate_time.unsqueeze(0), method="rk4")
-output = result["output"]
-output = output.squeeze()
-# print(f"{output['prediction'].shape}=")
-# print(f"{slinky_data.shape=}")
+    data_module = SlinkyDataModule(
+        [slinky_data[:training_cutoff]],
+        [slinky_data[training_cutoff:]],
+        # [slinky_data[:training_cutoff]],
+        input_length=1,
+        target_length=args.init_length,
+        test_length=args.max_length,
+        batch_size=args.batch_size,
+        perturb=args.perturb,  # .01
+    )
+    data_module.setup()
+    print(len(data_module.train_dataloader()))
+    print(len(data_module.val_dataloader()))
 
-pred_trajectory = output.reshape(-1, num_cycles, 2, 3)[..., 0, :]
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join("checkpoints", args.name),
+        # filename="best-checkpoint",
+        save_top_k=1,
+        save_last=True,
+        verbose=True,
+        monitor="val_mse",
+        mode="min",
+    )
 
-evaluate_animation = animate_2d_slinky_trajectories(
-    torch.stack([true_trajectory, pred_trajectory]), 0.01
-)
+    early_stopping_callback = EarlyStopping(monitor="val_mse", patience=4)
 
-animation_html_file = "animation_tmp.html"
-evaluate_animation.write_html(animation_html_file, full_html=False)
-with open(animation_html_file, "r") as f:
-    evaluate_animation_html = "\n".join(f.readlines())
+    if args.log:
+        logger = WandbLogger(args.name)
+    else:
+        logger = WandbLogger(args.name, mode="disabled")
 
-torch.save(pred_trajectory, "pred_trajectory.pth")
-torch.save(true_trajectory[1:], "true_trajectory.pth")
+    wandb.config.update(args)
 
-wandb.log({"evaluate_animation": wandb.Html(evaluate_animation_html, inject=False)})
+    trainer = pl.Trainer.from_argparse_args(
+        args,
+        logger=logger,
+        enable_checkpointing=True,
+        reload_dataloaders_every_n_epochs=1,
+        callbacks=[
+            checkpoint_callback,
+            early_stopping_callback,
+            ClipLengthStepper(freq=args.incr_freq, max_len=args.max_length),
+        ],
+    )
+    # trainer = pl.Trainer(
+    #     gpus=args.devices,
+    #     logger=logger,
+    #     enable_checkpointing=True,
+    #     # max_epochs=N_EPOCHS,
+    #     min_epochs=args.min_epochs,
+    #     callbacks=[
+    #         checkpoint_callback,
+    #         early_stopping_callback,
+    #         ClipLengthStepper(freq=args.incr_freq, max_len=args.max_length),
+    #     ],
+    #     log_every_n_steps=10,
+    #     # clipping gradients is a hyperparameter and important to prevent divergance
+    #     # of the gradient for recurrent neural networks
+    #     gradient_clip_val=args.grad_clip,
+    #     reload_dataloaders_every_n_epochs=1,
+    #     # profiler="advanced",
+    #     # progress_bar_refresh_rate=1,
+    #     # strategy="dp",
+    #     # fast_dev_run=True
+    # )
+
+    if args.checkpoint:
+        model = SlinkyTrajectoryRegressor.load_from_checkpoint(
+            args.checkpoint  # , dim_per_layer=32, n_layers=5
+        )
+        # model.load_state_dict(checkpoint.state_dict())
+    else:
+        model = SlinkyTrajectoryRegressor(**vars(args))
+
+    if not args.test_only:
+        trainer.fit(model=model, datamodule=data_module)
+
+    start_point = slinky_data[0]["state"][None, None, :]
+    # print(start_point)
+    # sys.exit()
+    model.eval()
+    evaluate_time = torch.from_numpy(slinky_data["time"]).to(get_model_device(model))
+
+    true_trajectory = (
+        slinky_data["state"].detach().reshape(-1, num_cycles, 2, 3)[1:, :, 0, :]
+    )
+
+    result = model.forward(start_point, evaluate_time.unsqueeze(0), method="dopri5")
+    output = result["output"]
+    output = output.squeeze()
+
+    pred_trajectory = output.reshape(-1, num_cycles, 2, 3)[..., 0, :]
+
+    evaluate_animation = animate_2d_slinky_trajectories(
+        torch.stack([true_trajectory, pred_trajectory]), 0.01
+    )
+
+    animation_html_file = "animation_tmp.html"
+    evaluate_animation.write_html(animation_html_file, full_html=False)
+    with open(animation_html_file, "r") as f:
+        evaluate_animation_html = "\n".join(f.readlines())
+
+    torch.save(pred_trajectory, "pred_trajectory.pth")
+    torch.save(true_trajectory[1:], "true_trajectory.pth")
+
+    wandb.log({"evaluate_animation": wandb.Html(evaluate_animation_html, inject=False)})
