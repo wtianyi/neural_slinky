@@ -6,6 +6,7 @@ seed: 0
 # devices: [2]
 incr_freq: 1
 init_length: 2
+val_length: 20
 max_length: 70
 perturb: 0
 kinetic_reg: 0.0
