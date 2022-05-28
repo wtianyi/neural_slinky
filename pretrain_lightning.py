@@ -26,20 +26,36 @@ class DouglasForceDataModule(pl.LightningDataModule):
         self,
         batch_size=8,
         perturb: float = 0,
+        datafile_path: str = "data/douglas_dataset.pt",
+        fit_energy: bool = False,
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.batch_size = batch_size
         self.perturb = perturb
+        self.datafile_path = datafile_path
 
     @staticmethod
     def add_argparse_args(parent_parser):
         parser = parent_parser.add_argument_group("DouglasForceData")
         parser.add_argument("--batch_size", type=int, help="Batch size")
         parser.add_argument(
+            "--datafile_path",
+            type=str,
+            default="data/douglas_dataset.pt",
+            help="Data file path",
+        )
+        parser.add_argument(
             "--perturb",
             type=float,
             default=0,
             help="Gaussian perturbation augmentation scale",
+        )
+        parser.add_argument(
+            "--fit_energy",
+            action="store_true",
+            default=False,
+            help="Whether to fit the energy",
         )
         return parent_parser
 
@@ -47,7 +63,7 @@ class DouglasForceDataModule(pl.LightningDataModule):
         key = "cartesian_alpha"
 
         douglas_dataset_dict: Dict[str, Dict[str, torch.Tensor]] = torch.load(
-            "data/douglas_dataset.pt"
+            self.datafile_path
         )
         # column_perm_inds = [0, 1, 2, 3, 4, 5, 6, 7, 8]
         input_tensor = (
@@ -64,21 +80,71 @@ class DouglasForceDataModule(pl.LightningDataModule):
             .detach()
             .requires_grad_(False)
         )
+
         input_tensor = input_tensor.reshape(input_tensor.shape[:-1] + (3, 3))
         # appending additional 3 dimensions to conform with the data format in NODE paradigm
         input_tensor = torch.cat((input_tensor, torch.zeros_like(input_tensor)), dim=-1)
         output_tensor = output_tensor.reshape(output_tensor.shape[:-1] + (3, 3))
         print("input shape:", input_tensor.shape)
         print("output shape:", output_tensor.shape)
-        train_val_input, test_input, train_val_output, test_output = train_test_split(
-            input_tensor, output_tensor, test_size=0.2, shuffle=True
-        )
-        train_input, val_input, train_output, val_output = train_test_split(
-            train_val_input, train_val_output, test_size=0.2, shuffle=True
-        )
-        self.train_dataset = torch_data.TensorDataset(train_input, train_output)
-        self.val_dataset = torch_data.TensorDataset(val_input, val_output)
-        self.test_dataset = torch_data.TensorDataset(test_input, test_output)
+
+        if self.hparams.fit_energy:
+            energy_tensor = (
+                douglas_dataset_dict["energy"]
+                .float()
+                .clone()
+                .detach()
+                .requires_grad_(False)
+            )
+            print("energy shape:", energy_tensor.shape)
+            (
+                train_val_input,
+                test_input,
+                train_val_output,
+                test_output,
+                train_val_energy,
+                test_energy,
+            ) = train_test_split(
+                input_tensor, output_tensor, energy_tensor, test_size=0.2, shuffle=True
+            )
+            (
+                train_input,
+                val_input,
+                train_output,
+                val_output,
+                train_energy,
+                val_energy,
+            ) = train_test_split(
+                train_val_input,
+                train_val_output,
+                train_val_energy,
+                test_size=0.2,
+                shuffle=True,
+            )
+            self.train_dataset = torch_data.TensorDataset(
+                train_input, train_output, train_energy
+            )
+            self.val_dataset = torch_data.TensorDataset(
+                val_input, val_output, val_energy
+            )
+            self.test_dataset = torch_data.TensorDataset(
+                test_input, test_output, test_energy
+            )
+        else:
+            (
+                train_val_input,
+                test_input,
+                train_val_output,
+                test_output,
+            ) = train_test_split(
+                input_tensor, output_tensor, test_size=0.2, shuffle=True
+            )
+            train_input, val_input, train_output, val_output = train_test_split(
+                train_val_input, train_val_output, test_size=0.2, shuffle=True
+            )
+            self.train_dataset = torch_data.TensorDataset(train_input, train_output)
+            self.val_dataset = torch_data.TensorDataset(val_input, val_output)
+            self.test_dataset = torch_data.TensorDataset(test_input, test_output)
 
     def train_dataloader(self):
         return torch_data.DataLoader(
@@ -86,11 +152,16 @@ class DouglasForceDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             drop_last=False,
+            num_workers=32,
         )
 
     def val_dataloader(self):
         return torch_data.DataLoader(
-            self.val_dataset, batch_size=self.batch_size, shuffle=False, drop_last=False
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=32,
         )
 
     def test_dataloader(self):
@@ -99,6 +170,7 @@ class DouglasForceDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             drop_last=False,
+            num_workers=32,
         )
 
     # def transfer_batch_to_device(self, batch, device, dataloader_idx):
@@ -127,6 +199,9 @@ class DouglasForceRegressor(pl.LightningModule):
         n_layers: int,
         lr: float,
         weight_decay: float,
+        pretrained_net: Optional[str] = None,
+        fit_energy: bool = False,
+        energy_loss_coef: float = 0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -139,7 +214,16 @@ class DouglasForceRegressor(pl.LightningModule):
         self.boundaries = (1, 1)
         assert net_type in net_type_dict, f"Unrecognized net_type: {net_type}"
         self.net = net_type_dict[net_type](dim_per_layer, n_layers, self.boundaries)
+        if pretrained_net:
+            self._load_pretrained_net(self.net, pretrained_net)
         self.register_buffer("feat_weights", torch.tensor([1e2, 1e2, 1]))
+
+    def _anneal_feat_weights(self):
+        if self.feat_weights[2] < 100:
+            self.feat_weights[2] += 1
+
+    def on_epoch_end(self) -> None:
+        self._anneal_feat_weights()
 
     @staticmethod
     def add_argparse_args(parent_parser):
@@ -153,6 +237,11 @@ class DouglasForceRegressor(pl.LightningModule):
             "--weight_decay", type=float, help="Weight decay of optimizer"
         )
         parser.add_argument(
+            "--energy_loss_coef",
+            type=float,
+            help="The coeffcient of energy fitting loss",
+        )
+        parser.add_argument(
             "--net_type",
             default="ESNN",
             choices=["ESNN", "EMLP", "ESNN2"],
@@ -162,7 +251,10 @@ class DouglasForceRegressor(pl.LightningModule):
         return parent_parser
 
     def forward(
-        self, input: torch.Tensor, truth: Optional[torch.Tensor] = None
+        self,
+        input: torch.Tensor,
+        truth: Optional[torch.Tensor] = None,
+        energy_truth: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward
 
@@ -173,9 +265,16 @@ class DouglasForceRegressor(pl.LightningModule):
             torch.Tensor: TensorType["batch", "cycles", "forces":3]
         """
         output = self.net(input)
+        # energy = 0
         loss = 0
+        if self.hparams.fit_energy:
+            energy = self.net.cal_energy(input)
+            if energy_truth is not None:
+                loss += self.hparams.energy_loss_coef * self.energy_criterion(
+                    energy_truth, energy
+                )
         if truth is not None:
-            loss = self.criterion(truth, output)
+            loss += self.criterion(truth, output)
         return {"output": output, "loss": loss}
 
     def _trim_boundaries(self, x: torch.Tensor) -> torch.Tensor:
@@ -218,9 +317,18 @@ class DouglasForceRegressor(pl.LightningModule):
         squared_error = squared_error * self.feat_weights
         return squared_error.mean()
 
+    def energy_criterion(
+        self, energy_truth: torch.Tensor, energy_prediction: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.mean((energy_truth - energy_prediction) ** 2)
+
     def training_step(self, batch, batch_idx):
-        input, force_truth = batch
-        result = self.forward(input, force_truth)
+        if self.hparams.fit_energy:
+            input, force_truth, energy_truth = batch
+            result = self.forward(input, force_truth, energy_truth)
+        else:
+            input, force_truth = batch
+            result = self.forward(input, force_truth)
         loss = result["loss"]
         force_prediction = result["output"]
         self.log(
@@ -242,8 +350,12 @@ class DouglasForceRegressor(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        input, force_truth = batch
-        result = self.forward(input, force_truth)
+        if self.hparams.fit_energy:
+            input, force_truth, energy_truth = batch
+            result = self.forward(input, force_truth, energy_truth)
+        else:
+            input, force_truth = batch
+            result = self.forward(input, force_truth)
         loss = result["loss"]
         self.log("loss/val", loss, prog_bar=True, logger=True)
         if batch_idx % 90 == 0:
@@ -274,8 +386,12 @@ class DouglasForceRegressor(pl.LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
-        input, force_truth = batch
-        result = self.forward(input, force_truth)
+        if self.hparams.fit_energy:
+            input, force_truth, energy_truth = batch
+            result = self.forward(input, force_truth, energy_truth)
+        else:
+            input, force_truth = batch
+            result = self.forward(input, force_truth)
         loss = result["loss"]
         self.log("loss/test", loss, prog_bar=True, logger=True)
         return loss
@@ -286,6 +402,11 @@ class DouglasForceRegressor(pl.LightningModule):
             lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
         )
+
+    def _load_pretrained_net(self, net: torch.nn.Module, pretrained_checkpoint: str):
+        state_dict = torch.load(pretrained_checkpoint, map_location=self.device)
+        net.load_state_dict(state_dict)
+        return net
 
 
 if __name__ == "__main__":

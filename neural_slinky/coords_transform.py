@@ -563,14 +563,19 @@ def transform_cartesian_alpha_to_douglas_single(cartesian_alpha_input: torch.Ten
     alpha_1 = cartesian_alpha_input[..., 0, 2]
     alpha_2 = cartesian_alpha_input[..., 1, 2]
 
-    l = (cartesian_alpha_input[..., 1, 0:2] - cartesian_alpha_input[..., 0, 0:2]).norm(
-        dim=-1
-    )
+    # l = (cartesian_alpha_input[..., 1, 0:2] - cartesian_alpha_input[..., 0, 0:2]).norm(
+    #     dim=-1
+    # )
+    l = (cartesian_alpha_input[..., 1, 0:2] - cartesian_alpha_input[..., 0, 0:2])
 
     psi = 0.5 * (alpha_1 + alpha_2)
 
-    dxi = l * torch.cos(psi)
-    dz = l * torch.sin(psi)
+    # dxi = l * torch.cos(psi)
+    # dz = l * torch.sin(psi)
+    sin = torch.sin(psi)
+    cos = torch.cos(psi)
+    dxi = dot(l, torch.stack([cos, sin], dim=-1))
+    dz = dot(l, torch.stack([sin, -cos], dim=-1))
 
     dphi = alpha_2 - alpha_1
 

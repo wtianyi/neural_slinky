@@ -66,7 +66,7 @@ class SlinkyDataModule(pl.LightningDataModule):
         test_trajectories,
         input_length,
         target_length,
-        test_length,
+        val_length,
         batch_size=8,
         perturb: float = 0,
     ):
@@ -76,7 +76,7 @@ class SlinkyDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.input_length = input_length
         self.target_length = target_length
-        self.test_length = test_length
+        self.test_length = val_length
         self.perturb = perturb
 
     def setup(self, stage: Optional[str] = None):
@@ -147,8 +147,11 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             self.net = emlp_models.SlinkyForceODEFunc(
                 num_layers=n_layers, boundaries=(1, 1)
             )
+        elif net_type == "quadratic":
+            self.net = node_f.ODEFuncQuadratic(douglas=True, boundaries=(1, 1))
 
         if pretrained_net:
+            print("loading " + pretrained_net)
             self._load_pretrained_net(self.net, pretrained_net)
 
         self.model = node_f.ODEPhys(self.net)
@@ -176,7 +179,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         parser.add_argument(
             "--net_type",
             default="ESNN",
-            choices=["ESNN", "EMLP", "ESNN2"],
+            choices=["ESNN", "EMLP", "ESNN2", "quadratic"],
             type=str,
             help="The type of force prediction network",
         )
@@ -347,9 +350,8 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             weight_decay=self.hparams.weight_decay,
         )
 
-    @staticmethod
-    def _load_pretrained_net(net: torch.nn.Module, pretrained_checkpoint: str):
-        state_dict = torch.load(pretrained_checkpoint)
+    def _load_pretrained_net(self, net: torch.nn.Module, pretrained_checkpoint: str):
+        state_dict = torch.load(pretrained_checkpoint, map_location=self.device)
         net.load_state_dict(state_dict)
         return net
 
@@ -370,7 +372,7 @@ class ClipLengthStepper(pl.Callback):
             and trainer.train_dataloader.dataset.datasets.target_length < self.max_len
         ):
             trainer.train_dataloader.dataset.datasets.target_length += 1
-            # trainer.val_dataloaders[0].dataset.target_length += 1
+            trainer.val_dataloaders[0].dataset.target_length += 1
             # trainer.test_dataloaders[0].dataset.target_length += 1
         return
 
@@ -394,6 +396,7 @@ if __name__ == "__main__":
         "--incr_freq", type=int, help="Clip length increment frequency in epochs"
     )
     parser.add_argument("--max_length", type=int, help="Max clip length")
+    parser.add_argument("--val_length", type=int, help="Max clip length")
     parser.add_argument("--init_length", type=int, help="Initial clip length")
     parser.add_argument(
         "--perturb",
@@ -429,7 +432,7 @@ if __name__ == "__main__":
         # [slinky_data[:training_cutoff]],
         input_length=1,
         target_length=args.init_length,
-        test_length=args.max_length,
+        val_length=args.val_length,
         batch_size=args.batch_size,
         perturb=args.perturb,  # .01
     )
