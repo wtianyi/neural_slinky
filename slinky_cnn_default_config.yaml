@@ -1,0 +1,21 @@
+seed: 0
+batch_size: 64
+min_epochs: 700
+gpus: 1
+gradient_clip_val: 0.5
+progress_bar_refresh_rate: 10
+
+lr: 0.0001
+weight_decay: 0
+dim_list: [6, 64, 64, 64, 64, 6]
+residual: True
+teacher_forcing: 0.8
+
+init_clip_len: 1
+final_clip_len: 700
+anneal_clip_lenght_epochs: 400
+
+# this will overwrite the `teacher_forcing`
+init_teacher_forcing: 0.8
+final_teacher_forcing: 0.2
+teacher_forcing_anneal_epochs: 600
