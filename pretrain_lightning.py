@@ -202,6 +202,7 @@ class DouglasForceRegressor(pl.LightningModule):
         pretrained_net: Optional[str] = None,
         fit_energy: bool = False,
         energy_loss_coef: float = 0,
+        cvx_penalty: float = 0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -209,11 +210,18 @@ class DouglasForceRegressor(pl.LightningModule):
         net_type_dict = {
             "ESNN": node_f.ODEFunc,
             "ESNN2": node_f.ODEFunc2,
+            "quadratic": node_f.ODEFuncQuadratic,
+            "CVXESNN2": node_f.ODEFunc2Cvx,
+            "PCVXESNN2": node_f.ODEFunc2PartialCvx,
             # "EMLP": emlp_models.SlinkyForceODEFunc,
         }
         self.boundaries = (1, 1)
         assert net_type in net_type_dict, f"Unrecognized net_type: {net_type}"
-        self.net = net_type_dict[net_type](dim_per_layer, n_layers, self.boundaries)
+        self.net = net_type_dict[net_type](
+            NeuronsPerLayer=dim_per_layer,
+            NumLayer=n_layers,
+            Boundaries=self.boundaries,
+        )
         if pretrained_net:
             self._load_pretrained_net(self.net, pretrained_net)
         self.register_buffer("feat_weights", torch.tensor([1e2, 1e2, 1]))
@@ -242,9 +250,15 @@ class DouglasForceRegressor(pl.LightningModule):
             help="The coeffcient of energy fitting loss",
         )
         parser.add_argument(
+            "--cvx_penalty",
+            type=float,
+            default=0,
+            help="The coeffcient of convexity penalty",
+        )
+        parser.add_argument(
             "--net_type",
             default="ESNN",
-            choices=["ESNN", "EMLP", "ESNN2"],
+            choices=["ESNN", "EMLP", "ESNN2", "quadratic", "CVXESNN2", "PCVXESNN2"],
             type=str,
             help="The type of force prediction network",
         )
@@ -268,13 +282,19 @@ class DouglasForceRegressor(pl.LightningModule):
         # energy = 0
         loss = 0
         if self.hparams.fit_energy:
-            energy = self.net.cal_energy(input)
+            energy = self.net.cal_energy(input[..., :3])
             if energy_truth is not None:
+                # print(f"{energy_truth.shape=}")
+                # print(f"{energy.shape=}")
+                # print(f"{input.shape=}")
                 loss += self.hparams.energy_loss_coef * self.energy_criterion(
-                    energy_truth, energy
+                    energy_truth, energy.sum(dim=-1)
                 )
         if truth is not None:
             loss += self.criterion(truth, output)
+
+        if self.hparams.cvx_penalty:
+            loss += self.hparams.cvx_penalty * self.net.net.compute_cvx_penalty()
         return {"output": output, "loss": loss}
 
     def _trim_boundaries(self, x: torch.Tensor) -> torch.Tensor:
@@ -397,11 +417,19 @@ class DouglasForceRegressor(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
         )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.2, patience=10, verbose=True, min_lr=1e-5
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": scheduler,
+            "monitor": "loss/val",
+        }
 
     def _load_pretrained_net(self, net: torch.nn.Module, pretrained_checkpoint: str):
         state_dict = torch.load(pretrained_checkpoint, map_location=self.device)
@@ -427,8 +455,8 @@ if __name__ == "__main__":
         help="Only evaluate the model. (Not very meaningful if not loading a trained checkpoint)",
     )
 
-    pos_inds = [0, 1, 3, 4, 6, 7]
-    rot_inds = [2, 5, 8]
+    # pos_inds = [0, 1, 3, 4, 6, 7]
+    # rot_inds = [2, 5, 8]
 
     DouglasForceDataModule.add_argparse_args(parser)
     DouglasForceRegressor.add_argparse_args(parser)
