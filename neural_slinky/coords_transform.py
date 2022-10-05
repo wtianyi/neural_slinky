@@ -268,46 +268,46 @@ def transform_triplet_to_cartesian_alpha(cycle_triplet_coord: torch.Tensor):
     )
 
 
+# def transform_cartesian_alpha_to_douglas(cartesian_alpha_input: torch.Tensor):
+#     """
+#     Args:
+#         cartesian_alpha_input: input tensor of shape (... x 9). The columns are
+#             (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2,
+#             ...)
+#     Returns:
+#         Douglas model's degrees of freedom of shape (... x 2 x 3).
+#         The last axis is (dxi, dz, dphi)
+#     """
+#     alpha_1 = cartesian_alpha_input[..., 2]
+#     alpha_2 = cartesian_alpha_input[..., 5]
+#     alpha_3 = cartesian_alpha_input[..., 8]
+
+#     l1 = cartesian_alpha_input[..., 3:5] - cartesian_alpha_input[..., 0:2]
+#     l2 = cartesian_alpha_input[..., 6:8] - cartesian_alpha_input[..., 3:5]
+
+#     theta = signed_angle_2d(l2, l1)
+
+#     l1_norm = l1.norm(dim=-1)
+#     l2_norm = l2.norm(dim=-1)
+
+#     psi_1 = 0.5 * (alpha_1 + alpha_2)
+#     psi_2 = 0.5 * (alpha_2 + alpha_3) + theta
+
+#     dxi_1 = l1_norm * torch.cos(psi_1)
+#     dz_1 = l1_norm * torch.sin(psi_1)
+
+#     dxi_2 = l2_norm * torch.cos(psi_2)
+#     dz_2 = l2_norm * torch.sin(psi_2)
+
+#     dphi_1 = alpha_2 - alpha_1
+#     dphi_2 = alpha_3 - alpha_2
+
+#     first_pair = torch.stack([dxi_1, dz_1, dphi_1], dim=-1)
+#     second_pair = torch.stack([dxi_2, dz_2, dphi_2], dim=-1)
+#     return torch.stack([first_pair, second_pair], dim=-2)  # (... x 2 x 3)
+
+
 def transform_cartesian_alpha_to_douglas(cartesian_alpha_input: torch.Tensor):
-    """
-    Args:
-        cartesian_alpha_input: input tensor of shape (... x 9). The columns are
-            (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2,
-            ...)
-    Returns:
-        Douglas model's degrees of freedom of shape (... x 2 x 3).
-        The last axis is (dxi, dz, dphi)
-    """
-    alpha_1 = cartesian_alpha_input[..., 2]
-    alpha_2 = cartesian_alpha_input[..., 5]
-    alpha_3 = cartesian_alpha_input[..., 8]
-
-    l1 = cartesian_alpha_input[..., 3:5] - cartesian_alpha_input[..., 0:2]
-    l2 = cartesian_alpha_input[..., 6:8] - cartesian_alpha_input[..., 3:5]
-
-    theta = signed_angle_2d(l2, l1)
-
-    l1_norm = l1.norm(dim=-1)
-    l2_norm = l2.norm(dim=-1)
-
-    psi_1 = 0.5 * (alpha_1 + alpha_2)
-    psi_2 = 0.5 * (alpha_2 + alpha_3) + theta
-
-    dxi_1 = l1_norm * torch.cos(psi_1)
-    dz_1 = l1_norm * torch.sin(psi_1)
-
-    dxi_2 = l2_norm * torch.cos(psi_2)
-    dz_2 = l2_norm * torch.sin(psi_2)
-
-    dphi_1 = alpha_2 - alpha_1
-    dphi_2 = alpha_3 - alpha_2
-
-    first_pair = torch.stack([dxi_1, dz_1, dphi_1], dim=-1)
-    second_pair = torch.stack([dxi_2, dz_2, dphi_2], dim=-1)
-    return torch.stack([first_pair, second_pair], dim=-2)  # (... x 2 x 3)
-
-
-def transform_cartesian_alpha_to_douglas_v2(cartesian_alpha_input: torch.Tensor):
     """
     Args:
         cartesian_alpha_input: input tensor of shape (... x 9). The columns are
@@ -334,13 +334,13 @@ def transform_cartesian_alpha_to_douglas_v2(cartesian_alpha_input: torch.Tensor)
 
     sin_1 = torch.sin(psi_1)
     cos_1 = torch.cos(psi_1)
-    dxi_1 = dot(l1, torch.stack([cos_1, sin_1], dim=-1))
-    dz_1 = dot(l1, torch.stack([sin_1, -cos_1], dim=-1))
+    dz_1 = dot(l1, torch.stack([cos_1, sin_1], dim=-1))
+    dxi_1 = dot(l1, torch.stack([sin_1, -cos_1], dim=-1))
 
     sin_2 = torch.sin(psi_2)
     cos_2 = torch.cos(psi_2)
-    dxi_2 = dot(l2, torch.stack([cos_2, sin_2], dim=-1))
-    dz_2 = dot(l2, torch.stack([sin_2, -cos_2], dim=-1))
+    dz_2 = dot(l2, torch.stack([cos_2, sin_2], dim=-1))
+    dxi_2 = dot(l2, torch.stack([sin_2, -cos_2], dim=-1))
 
     dphi_1 = alpha_2 - alpha_1
     dphi_2 = alpha_3 - alpha_2
@@ -362,7 +362,7 @@ def transform_cartesian_alpha_to_triplet(cartesian_alpha_input: torch.Tensor):
     """
     l1 = cartesian_alpha_input[..., 3:5] - cartesian_alpha_input[..., 0:2]
     l2 = cartesian_alpha_input[..., 6:8] - cartesian_alpha_input[..., 3:5]
-    offset_angle = torch.atan2(l1[...,1], l1[...,0]).detach()
+    offset_angle = torch.atan2(l1[..., 1], l1[..., 0]).detach()
 
     alpha_1 = cartesian_alpha_input[..., 2] - offset_angle
     alpha_2 = cartesian_alpha_input[..., 5] - offset_angle
@@ -566,7 +566,7 @@ def transform_cartesian_alpha_to_douglas_single(cartesian_alpha_input: torch.Ten
     # l = (cartesian_alpha_input[..., 1, 0:2] - cartesian_alpha_input[..., 0, 0:2]).norm(
     #     dim=-1
     # )
-    l = (cartesian_alpha_input[..., 1, 0:2] - cartesian_alpha_input[..., 0, 0:2])
+    l = cartesian_alpha_input[..., 1, 0:2] - cartesian_alpha_input[..., 0, 0:2]
 
     psi = 0.5 * (alpha_1 + alpha_2)
 
@@ -574,12 +574,93 @@ def transform_cartesian_alpha_to_douglas_single(cartesian_alpha_input: torch.Ten
     # dz = l * torch.sin(psi)
     sin = torch.sin(psi)
     cos = torch.cos(psi)
-    dxi = dot(l, torch.stack([cos, sin], dim=-1))
-    dz = dot(l, torch.stack([sin, -cos], dim=-1))
+    dz = dot(l, torch.stack([cos, sin], dim=-1))
+    dxi = dot(l, torch.stack([sin, -cos], dim=-1))
 
     dphi = alpha_2 - alpha_1
 
     return torch.stack([dxi, dz, dphi], dim=-1)  # (... x 3)
+
+
+def transform_douglas_to_cartesian_alpha_single(douglas_coords: torch.Tensor):
+    """
+    Args:
+        douglas_coords (TensorType[..., 3]): The last axis is (dxi, dz, dphi)
+    Returns:
+        cartesian_alpha_coords (TensorType[..., 6]): The columns are
+            (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2)
+    """
+    dxi = douglas_coords[..., 0]
+    dz = douglas_coords[..., 1]
+    dphi = douglas_coords[..., 2]
+
+    beta = torch.atan2(dz, dxi)
+    alpha_1 = 0.5 * torch.pi - 0.5 * dphi - beta
+    alpha_2 = 0.5 * torch.pi + 0.5 * dphi - beta
+
+    l = torch.sqrt(dxi**2 + dz**2)
+
+    center_1 = torch.stack([l.detach() - l, torch.zeros_like(l)], dim=-1)
+    center_2 = torch.stack([l, torch.zeros_like(l)], dim=-1)
+    return torch.cat(
+        [
+            center_1,
+            alpha_1[..., None],
+            center_2,
+            alpha_2[..., None],
+        ],
+        dim=-1,
+    )
+
+
+def transform_douglas_to_cartesian_alpha(douglas_coords: torch.Tensor):
+    """
+    Args:
+        douglas_coords (TensorType[..., 2, 3]): Pairs of douglas coordinate sets
+            representing triplets of cycles. The last axis is (dxi, dz, dphi)
+    Returns:
+        cartesian_alpha_coords (TensorType[..., 9]): The columns are
+            (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2, ...)
+    """
+    dxi_1 = douglas_coords[..., 0, 0]
+    dz_1 = douglas_coords[..., 0, 1]
+    dphi_1 = douglas_coords[..., 0, 2]
+
+    dxi_2 = douglas_coords[..., 1, 0]
+    dz_2 = douglas_coords[..., 1, 1]
+    dphi_2 = douglas_coords[..., 1, 2]
+
+    beta_1 = torch.atan2(dz_1, dxi_1)
+    beta_2 = torch.atan2(dz_2, dxi_2)
+
+    alpha_1 = 0.5 * torch.pi - 0.5 * dphi_1 - beta_1
+    alpha_2 = 0.5 * torch.pi + 0.5 * dphi_1 - beta_1
+
+    alpha_2_2 = 0.5 * torch.pi - 0.5 * dphi_2 - beta_2
+    alpha_3 = 0.5 * torch.pi + 0.5 * dphi_2 - beta_2
+    theta = (alpha_2_2 - alpha_2).detach()
+    alpha_3 -= theta
+
+    l1 = torch.sqrt(dxi_1**2 + dz_1**2)
+    l2 = torch.sqrt(dxi_2**2 + dz_2**2)
+
+    center_1 = torch.stack([l1.detach() - l1, torch.zeros_like(l1)], dim=-1)
+    center_2 = torch.stack([l1, torch.zeros_like(l1)], dim=-1)
+    center_3 = torch.stack(
+        [l1.detach() + l2 * torch.cos(theta), -l2 * torch.sin(theta)], dim=-1
+    )
+
+    return torch.cat(
+        [
+            center_1,
+            alpha_1[..., None],
+            center_2,
+            alpha_2[..., None],
+            center_3,
+            alpha_3[..., None],
+        ],
+        dim=-1,
+    )
 
 
 # def transform_cartesian_alpha_to_triplet(cartesian_alpha_input: torch.Tensor):

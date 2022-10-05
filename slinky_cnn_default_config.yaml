@@ -19,3 +19,5 @@ anneal_clip_lenght_epochs: 400
 init_teacher_forcing: 0.8
 final_teacher_forcing: 0.2
 teacher_forcing_anneal_epochs: 600
+
+boundaries: [1,0]

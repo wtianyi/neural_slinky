@@ -2,7 +2,7 @@ import os
 import random
 from multiprocessing.sharedctypes import Value
 import sys
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -21,44 +21,6 @@ import wandb
 from neural_slinky import trajectory_dataset
 from neural_slinky.utils import animate_2d_slinky_trajectories
 from priority_memory import batch
-
-
-def read_data():
-    # folder = "NeuralODE_Share2/SlinkyGroundTruth"
-    folder = "slinky-is-sliding/SlinkyGroundTruth"
-    num_cycles = 76
-    true_y = np.loadtxt(folder + "/helixCoordinate_2D.txt", delimiter=",")
-    true_v = np.loadtxt(folder + "/helixVelocity_2D.txt", delimiter=",")
-    true_y = torch.from_numpy(true_y).float()
-    true_v = torch.from_numpy(true_v).float()
-    true_y = torch.reshape(true_y, (true_y.size()[0], num_cycles, 3))
-    true_v = torch.reshape(true_v, (true_v.size()[0], num_cycles, 3))
-    # print(true_v.shape)
-    delta_t = 0.001
-    time = np.arange(true_y.shape[0]) * delta_t
-    # coord_names = []
-    # vel_names = []
-    # for i in range(80):
-    #     coord_names.append(f"x_{i}")
-    #     coord_names.append(f"y_{i}")
-    #     coord_names.append(f"a_{i}")
-    #     vel_names.append(f"xv_{i}")
-    #     vel_names.append(f"yv_{i}")
-    #     vel_names.append(f"av_{i}")
-    # df = pd.DataFrame(
-    #     np.concatenate((true_y, true_v), -1), columns=coord_names + vel_names
-    # )
-    # df["time"] = time
-    # df.index.name = "step"
-    # return df.reset_index(), coord_names + vel_names
-    return (
-        batch.Batch(
-            state=torch.cat((true_y, true_v), axis=-1).transpose(-2, -1).contiguous(),
-            time=time,
-        ),
-        num_cycles,
-        delta_t,
-    )
 
 
 class SlinkyDataModule(pl.LightningDataModule):
@@ -145,6 +107,23 @@ class SlinkyDataModule(pl.LightningDataModule):
 #         return layers
 
 
+class CenteringLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("averaging_kernel", torch.nn.Parameter(torch.tensor([])))
+
+    def forward(self, slinky_states: torch.Tensor):
+        """Center the x, y for input triplet
+
+        Args:
+            slinky_states (torch.Tensor): TensorType[..., "state": 6, "cycles"]
+
+        Returns:
+            centered_slinky_states (torch.Tensor): TensorType[..., "state": 6, "cycles"]
+        """
+        pass
+        # return slinky_states - 
+
 class SlinkyCNN(nn.Module):
     def __init__(self, dim_list: List[int], residual=True):
         super(SlinkyCNN, self).__init__()
@@ -183,10 +162,26 @@ class SlinkyCNN(nn.Module):
                             out_channels=out_size,
                             kernel_size=3,
                             padding=1,
+                            padding_mode="replicate",
                         ),
                         torch.nn.GELU(),
                         # torch.nn.BatchNorm1d(out_size),
                     )
+                    # torch.nn.Sequential(
+                    #     torch.nn.Conv1d(
+                    #         in_channels=in_size,
+                    #         out_channels=3 * out_size,
+                    #         kernel_size=3,
+                    #         padding=0,
+                    #     ),
+                    #     torch.nn.ConvTranspose1d(
+                    #         in_channels=3 * out_size,
+                    #         out_channels=out_size,
+                    #         kernel_size=3,
+                    #     ),
+                    #     torch.nn.GELU(),
+                    #     # torch.nn.BatchNorm1d(out_size),
+                    # )
                 )
             else:
                 layers.append(
@@ -208,6 +203,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         teacher_forcing: float = 0,
         lr: float = 1e-4,
         weight_decay: float = 0,
+        boundaries: Sequence[int] = (1, 1),
         **kwargs,
     ) -> None:
         super().__init__()
@@ -216,12 +212,13 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         # self.criterion = nn.MSELoss()
         self.teacher_forcing: float = teacher_forcing
         self.register_buffer("feat_weights", torch.tensor([1e2, 1e2, 1, 1e2, 1e2, 1]))
-        self.boundaries = (1, 1)
+        self.boundaries = boundaries
 
     @staticmethod
     def add_argparse_args(parent_parser):
         parser = parent_parser.add_argument_group("SlinkyTrajectoryRegressor")
         parser.add_argument("--dim_list", type=int, nargs="+")
+        parser.add_argument("--boundaries", type=int, nargs="+")
         parser.add_argument("--residual", type=bool, default=True)
         parser.add_argument("--teacher_forcing", type=float, default=1)
         parser.add_argument(
@@ -259,7 +256,8 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             raise ValueError(
                 f"The shape of the input is expected to be (n_batch, n_time, n_feat, n_cycle). Got {input.shape=}"
             )
-        centered_input = self._recenter_coords(input)
+        # centered_input = self._recenter_coords(input)
+        centered_input = input
         output: torch.Tensor = self.model(
             centered_input.flatten(start_dim=0, end_dim=1)
         )
@@ -361,7 +359,9 @@ class TeacherForcingStepper(pl.Callback):
     def on_train_epoch_start(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
-        pl_module.log("teacher_forcing", self._teacher_forcing_ratio, prog_bar=True, logger=True)
+        pl_module.log(
+            "teacher_forcing", self._teacher_forcing_ratio, prog_bar=True, logger=True
+        )
         if self.counter < self.epochs:
             pl_module.teacher_forcing = self._teacher_forcing_ratio
             self._teacher_forcing_ratio += self.step_size
@@ -399,12 +399,12 @@ class ClipLengthStepper(pl.Callback):
     def on_train_epoch_start(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
-        pl_module.log("clip_length", self.cur_len, prog_bar=True, logger=True)
         if self.counter < self.epochs:
             self.cur_len = self.steps[self.counter]
             trainer.train_dataloader.dataset.datasets.target_length = self.cur_len
             trainer.val_dataloaders[0].dataset.target_length = self.cur_len
             self.counter += 1
+        pl_module.log("clip_length", self.cur_len, prog_bar=True, logger=True)
 
 
 if __name__ == "__main__":
@@ -421,13 +421,52 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, help="Batch size")
     parser.add_argument("--seed", type=int, default=0, help="The random seed")
     parser.add_argument("--name", type=str, help="Run name")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path")
+    parser.add_argument("--checkpoint_path", type=str, default=None, help="Checkpoint path")
     parser.add_argument(
         "--test_only",
         action="store_true",
         default=False,
         help="Only evaluate the model. (Not very meaningful if not loading a trained checkpoint)",
     )
+
+    def read_data():
+        # folder = "NeuralODE_Share2/SlinkyGroundTruth"
+        folder = "slinky-is-sliding/SlinkyGroundTruth"
+        num_cycles = 76
+        true_y = np.loadtxt(folder + "/helixCoordinate_2D.txt", delimiter=",")
+        true_v = np.loadtxt(folder + "/helixVelocity_2D.txt", delimiter=",")
+        true_y = torch.from_numpy(true_y).float()
+        true_v = torch.from_numpy(true_v).float()
+        true_y = torch.reshape(true_y, (true_y.size()[0], num_cycles, 3))
+        true_v = torch.reshape(true_v, (true_v.size()[0], num_cycles, 3))
+        # print(true_v.shape)
+        delta_t = 0.001
+        time = np.arange(true_y.shape[0]) * delta_t
+        # coord_names = []
+        # vel_names = []
+        # for i in range(80):
+        #     coord_names.append(f"x_{i}")
+        #     coord_names.append(f"y_{i}")
+        #     coord_names.append(f"a_{i}")
+        #     vel_names.append(f"xv_{i}")
+        #     vel_names.append(f"yv_{i}")
+        #     vel_names.append(f"av_{i}")
+        # df = pd.DataFrame(
+        #     np.concatenate((true_y, true_v), -1), columns=coord_names + vel_names
+        # )
+        # df["time"] = time
+        # df.index.name = "step"
+        # return df.reset_index(), coord_names + vel_names
+        return (
+            batch.Batch(
+                state=torch.cat((true_y, true_v), axis=-1)
+                .transpose(-2, -1)
+                .contiguous(),
+                time=time,
+            ),
+            num_cycles,
+            delta_t,
+        )
 
     SlinkyTrajectoryRegressor.add_argparse_args(parser)
     ClipLengthStepper.add_argparse_args(parser)
@@ -488,8 +527,8 @@ if __name__ == "__main__":
         # strategy="dp",
     )
 
-    if args.checkpoint:
-        model = SlinkyTrajectoryRegressor.load_from_checkpoint(args.checkpoint)
+    if args.checkpoint_path:
+        model = SlinkyTrajectoryRegressor.load_from_checkpoint(**vars(args))
     else:
         model = SlinkyTrajectoryRegressor(**vars(args))
 
@@ -497,12 +536,6 @@ if __name__ == "__main__":
         trainer.fit(model=model, datamodule=data_module)
 
     start_point = slinky_data[0]["state"].unsqueeze(0)
-    # print(start_point)
-    # sys.exit()
-    model.eval()
-    output = model.forward_autoregressive(start_point, len(slinky_data) - 1).squeeze()
-    # print(f"{output['prediction'].shape}=")
-    # print(f"{slinky_data.shape=}")
 
     true_trajectory = (
         slinky_data["state"]
@@ -510,11 +543,32 @@ if __name__ == "__main__":
         .transpose(-2, -1)
         .reshape(-1, num_cycles, 2, 3)[..., 0, :]
     )
-    print(f"{true_trajectory.shape=}")
+
+    ################################### TEMP ###################################
+    true_trajectory, num_cycles, delta_t = (
+        torch.load("40_vertical_still.pth"),
+        40,
+        0.001,
+    )
+    slinky_data = torch.cat(
+        [true_trajectory, torch.zeros_like(true_trajectory)], dim=-1
+    )
+    slinky_data = slinky_data.transpose(-2, -1)
+    start_point = slinky_data[0].unsqueeze(0)
+    ################################### TEMP ###################################
+
+    # print(start_point)
+    # sys.exit()
+    model.eval()
+    output = model.forward_autoregressive(start_point, len(slinky_data) - 1).squeeze()
+    # print(f"{output['prediction'].shape}=")
+    # print(f"{slinky_data.shape=}")
+
     pred_trajectory = output.transpose(-2, -1).reshape(-1, num_cycles, 2, 3)[..., 0, :]
+    pred_trajectory = torch.cat([true_trajectory[:1], pred_trajectory], dim=0)
 
     evaluate_animation = animate_2d_slinky_trajectories(
-        torch.stack([pred_trajectory, true_trajectory[1:]]), delta_t
+        torch.stack([pred_trajectory, true_trajectory]), delta_t
     )
 
     animation_html_file = "animation_tmp.html"
@@ -523,6 +577,8 @@ if __name__ == "__main__":
         evaluate_animation_html = "\n".join(f.readlines())
 
     torch.save(pred_trajectory, "pred_trajectory.pth")
-    torch.save(true_trajectory[1:], "true_trajectory.pth")
+    torch.save(true_trajectory, "true_trajectory.pth")
+    print(f"{pred_trajectory.shape=}")
+    print(f"{true_trajectory.shape=}")
 
     wandb.log({"evaluate_animation": wandb.Html(evaluate_animation_html, inject=False)})
