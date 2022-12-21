@@ -32,7 +32,10 @@ from slinky import func as node_f
 import pandas as pd
 
 import equinox as eqx
+from jaxtyping import Array, Float, PyTree, jaxtyped
+from typeguard import typechecked
 import jax
+import jax.tree_util as jtu
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.random as jrandom
@@ -42,9 +45,20 @@ import optax
 
 import plotly.graph_objects as go
 import plotly.express as px
+import io
 
 import itertools
 import tqdm
+
+import warnings
+
+# Suppress Pytorch Lightning warnings about dataloader workers
+warnings.filterwarnings("ignore", ".*does not have many workers.*")
+warnings.filterwarnings("ignore", ".*`training_step` returned `None`.*")
+warnings.filterwarnings("ignore", ".*GPU available but not used.*")
+warnings.filterwarnings(
+    "ignore", ".*`LightningModule\.configure_optimizers` returned `None`.*"
+)
 
 
 def animate_2d_slinky_trajectories(
@@ -212,7 +226,11 @@ def animate_2d_slinky_trajectories(
     return fig
 
 
-def cross2d(tensor_1: jnp.ndarray, tensor_2: jnp.ndarray) -> jnp.ndarray:
+@jaxtyped
+@typechecked
+def cross2d(
+    tensor_1: Float[Array, "*batch 2"], tensor_2: Float[Array, "*batch 2"]
+) -> Float[Array, "*batch 2"]:
     """Compute the cross product of two (arrays of) 2D vectors."""
     chex.assert_equal_shape([tensor_1, tensor_2])
     chex.assert_shape([tensor_1, tensor_2], (..., 2))
@@ -220,19 +238,31 @@ def cross2d(tensor_1: jnp.ndarray, tensor_2: jnp.ndarray) -> jnp.ndarray:
     return jnp.einsum("...i,ij,...j", tensor_1, cross_mat, tensor_2)
 
 
-def dot(tensor_1: jnp.ndarray, tensor_2: jnp.ndarray, keepdims=False) -> jnp.ndarray:
+@jaxtyped
+@typechecked
+def dot(
+    tensor_1: Float[Array, "*batch d"],
+    tensor_2: Float[Array, "*batch d"],
+    keepdims=False,
+) -> Float[Array, "*batch"]:
     """Dot product of two tensors along their last axis."""
     return jnp.sum(tensor_1 * tensor_2, axis=-1, keepdims=keepdims)
 
 
-def signed_angle_2d(self, v1: jnp.ndarray, v2: jnp.ndarray) -> jnp.ndarray:
+@jaxtyped
+@typechecked
+def signed_angle_2d(
+    v1: Float[Array, "*batch 2"], v2: Float[Array, "*batch 2"]
+) -> Float[Array, "*batch"]:
     """Compute the signed angle between two (arrays of) 2D vectors."""
     return jnp.arctan2(cross2d(v1, v2), dot(v1, v2, keepdims=False))
 
 
+@jaxtyped
+@typechecked
 def transform_cartesian_alpha_to_douglas_single(
-    cartesian_alpha_input: jnp.ndarray,
-) -> jnp.ndarray:
+    cartesian_alpha_input: Float[Array, "*batch 2 3"],
+) -> Float[Array, "*batch 3"]:
     """
     Args:
         cartesian_alpha_input: input tensor of shape (... x 2 x 3). The last two
@@ -264,7 +294,11 @@ def transform_cartesian_alpha_to_douglas_single(
     return jnp.stack([dxi, dz, dphi], axis=-1)  # (... x 3)
 
 
-def _convert_cartesian_alpha_to_douglas(state: jnp.ndarray):
+@jaxtyped
+@typechecked
+def _convert_cartesian_alpha_to_douglas(
+    state: Float[Array, "*batch cycles 6"]
+) -> Float[Array, "*batch cycles-1 3"]:
     """_summary_
 
     Args:
@@ -376,6 +410,8 @@ class DenseBlock(eqx.Module):
         return x
 
 
+# @jaxtyped
+# @typechecked
 class ODEFuncJax(eqx.Module):
     dim_per_layer: int
     num_layers: int
@@ -411,7 +447,9 @@ class ODEFuncJax(eqx.Module):
         self.boundaries = Boundaries
 
     @staticmethod
-    def _make_triplet_catesian_alpha(x: jnp.ndarray) -> jnp.ndarray:
+    def _make_triplet_catesian_alpha(
+        x: Float[Array, "*batch cycles 3"]
+    ) -> Float[Array, "*batch cycles-2 9"]:
         """Convert slinky coords to overlapping triplet coords, differentiably
 
         Args:
@@ -420,20 +458,71 @@ class ODEFuncJax(eqx.Module):
                 torch.Tensor: Shape of (n_batch x (n_cycles-2) x 9). The last axis is
                 (x_1, y_1, alpha_1, x_2, y_2, alpha_2, x_3, y_3, alpha_3)
         """
-        x_prev = x[:, :-2, :]
-        x_mid = x[:, 1:-1, :]
-        x_next = x[:, 2:, :]
+        x_prev = x[..., :-2, :]
+        x_mid = x[..., 1:-1, :]
+        x_next = x[..., 2:, :]
         return jnp.concatenate((x_prev, x_mid, x_next), axis=-1)
 
     @staticmethod
-    def chiral_transformation_x(data: jnp.ndarray) -> jnp.ndarray:
+    def chiral_transformation_x_douglas(
+        data: Float[Array, "*batchcycles 6"]
+    ) -> Float[Array, "*batchcycles 6"]:
+        # data is a 6-dim input vector
+        # the output is a 6-dim vector, as the mirror of input data with respect to the x-axis
+        new_data = data * jnp.array([1, -1, -1, 1, -1, -1])
+        return new_data
+
+    @staticmethod
+    def chiral_transformation_z_douglas(
+        data: Float[Array, "*batchcycles 6"]
+    ) -> Float[Array, "*batchcycles 6"]:
+        # data is a 6-dim input vector
+        # the output is a 6-dim vector, as the mirror of input data with respect to the z-axis
+        new_data = jnp.stack(
+            [
+                data[..., 3],
+                -data[..., 4],
+                data[..., 5],
+                data[..., 0],
+                -data[..., 1],
+                data[..., 2],
+            ],
+            axis=-1,
+        )
+        return new_data
+
+    @staticmethod
+    def chiral_transformation_xz_douglas(
+        data: Float[Array, "*batchcycles 6"]
+    ) -> Float[Array, "*batchcycles 6"]:
+        # data is a 6-dim input vector
+        # the output is a 6-dim vector, as the 180 degrees rotation of input data
+        new_data = jnp.stack(
+            [
+                data[..., 3],
+                data[..., 4],
+                -data[..., 5],
+                data[..., 0],
+                data[..., 1],
+                -data[..., 2],
+            ],
+            axis=-1,
+        )
+        return new_data
+
+    @staticmethod
+    def chiral_transformation_x_triplet(
+        data: Float[Array, "*batchcycles 6"]
+    ) -> Float[Array, "*batchcycles 6"]:
         # data is a 6-dim input vector
         # the output is a 6-dim vector, as the mirror of input data with respect to the x-axis
         new_data = data * jnp.array([1, 1, -1, -1, -1, -1])
         return new_data
 
     @staticmethod
-    def chiral_transformation_z(data: jnp.ndarray) -> jnp.ndarray:
+    def chiral_transformation_z_triplet(
+        data: Float[Array, "*batchcycles 6"]
+    ) -> Float[Array, "*batchcycles 6"]:
         # data is a 6-dim input vector
         # the output is a 6-dim vector, as the mirror of input data with respect to the z-axis
         new_data = jnp.stack(
@@ -450,7 +539,9 @@ class ODEFuncJax(eqx.Module):
         return new_data
 
     @staticmethod
-    def chiral_transformation_xz(data: jnp.ndarray) -> jnp.ndarray:
+    def chiral_transformation_xz_triplet(
+        data: Float[Array, "*batchcycles 6"]
+    ) -> Float[Array, "*batchcycles 6"]:
         # data is a 6-dim input vector
         # the output is a 6-dim vector, as the 180 degrees rotation of input data
         new_data = jnp.stack(
@@ -468,8 +559,8 @@ class ODEFuncJax(eqx.Module):
 
     @staticmethod
     def transform_cartesian_alpha_to_triplet(
-        cartesian_alpha_input: jnp.ndarray,
-    ) -> jnp.ndarray:
+        cartesian_alpha_input: Float[Array, "*batchcycles 9"]
+    ) -> Float[Array, "*batchcycles 6"]:
         """
         Args:
             cartesian_alpha_input: input tensor of shape (... x 9). The columns are
@@ -510,8 +601,8 @@ class ODEFuncJax(eqx.Module):
 
     @staticmethod
     def transform_cartesian_alpha_to_douglas(
-        cartesian_alpha_input: jnp.ndarray,
-    ) -> jnp.ndarray:
+        cartesian_alpha_input: Float[Array, "*batchcycles 9"],
+    ) -> Float[Array, "*batchcycles 2 3"]:
         """
         Args:
             cartesian_alpha_input: input tensor of shape (... x 9). The columns are
@@ -577,9 +668,9 @@ class ODEFuncJax(eqx.Module):
                 # trans.chiral_transformation_y(triplet_coords),
                 # trans.chiral_transformation_xy(triplet_coords),
                 # ############################ END TEMPORARY ############################
-                self.chiral_transformation_x(triplet_coords),
-                self.chiral_transformation_z(triplet_coords),
-                self.chiral_transformation_xz(triplet_coords),
+                self.chiral_transformation_x_douglas(triplet_coords),
+                self.chiral_transformation_z_douglas(triplet_coords),
+                self.chiral_transformation_xz_douglas(triplet_coords),
             ],
             axis=0,
         )  # chirality module
@@ -646,6 +737,8 @@ class ODEFuncJax(eqx.Module):
         return grad  # * torch.tensor([1e2, 1e2, 1]).type_as(grad)
 
 
+@jaxtyped
+@typechecked
 class ODEFuncQuadratic(eqx.Module):
     """Douglas force calculator
 
@@ -681,19 +774,19 @@ class ODEFuncQuadratic(eqx.Module):
         self.douglas = douglas
         self.boundaries = Boundaries
 
-    @staticmethod
-    def _make_pair_cartesian_alpha_coords(x: jnp.ndarray) -> jnp.ndarray:
+    def _make_pair_cartesian_alpha_coords(
+        self, x: Float[Array, "*batch cycles 3"]
+    ) -> Float[Array, "*batch cycles-1 2 3"]:
         """Convert slinky coords to overlapping triplet coords, differentiably
 
         Args:
-                x (torch.Tensor): slinky coords (n_batch x n_cycles x 3)
+                x (jnp.ndarray): slinky coords (n_batch x n_cycles x 3)
         Returns:
-                torch.Tensor: Shape of (n_batch x (n_cycles-1) x 2 x 3). The last axis is
-                (x_1, y_1, alpha_1, x_2, y_2, alpha_2, x_3, y_3, alpha_3)
+                jnp.ndarray: Shape of (n_batch x (n_cycles-1) x 2 x 3).
         """
-        x_prev = x[:, :-1, :]
+        x_prev = x[..., :-1, :]
         # x_mid = x[:, 1:-1, :]
-        x_next = x[:, 1:, :]
+        x_next = x[..., 1:, :]
         return jnp.stack((x_prev, x_next), axis=-2)
 
     def _preprocess(self, coords: jnp.ndarray) -> jnp.ndarray:
@@ -751,7 +844,7 @@ class ODEFuncQuadratic(eqx.Module):
         E = lax.cond(
             self.douglas,
             lambda model, dxi, dz, dphi: (
-                model.c_dxi * c_dxi_scale * jnp.tanh(dxi)
+                model.c_dxi * c_dxi_scale * dxi
                 + jnp.exp(model.c_log_dxi2) * dxi**2
                 + jnp.exp(model.c_log_dz2) * dz**2
                 + jnp.exp(model.c_log_dphi2) * dphi**2
@@ -778,10 +871,11 @@ class ODEFuncQuadratic(eqx.Module):
     def __call__(self, coords):
         coords = coords[..., :3]
 
+        @jax.grad
         def f(coords):
             return self.cal_energy(coords).sum()
 
-        grad = jax.grad(f)(coords)
+        grad = f(coords)
 
         if self.boundaries[0] == 1:
             grad = grad.at[..., 0, :].set(0)
@@ -795,11 +889,20 @@ class ODEPhysJax(eqx.Module):
     m: float
     J: float
     g: float
-    vel_copy_mat: jnp.ndarray
+    # vel_copy_mat: jnp.ndarray
     inv_inertia: jnp.ndarray
     # gVec: jnp.ndarray
     ODEFunc: eqx.Module
     boundaries: Tuple[int, int]
+
+    def get_trainable_filter(self):
+        filter_spec = jtu.tree_map(eqx.filters.is_inexact_array, self)
+        filter_spec = eqx.tree_at(
+            lambda tree: tree.inv_inertia,
+            filter_spec,
+            replace=False,
+        )
+        return filter_spec
 
     def __init__(self, ODEFunc: eqx.Module, Boundaries=(1, 1), *, key=None):
         super(ODEPhysJax, self).__init__()
@@ -810,9 +913,9 @@ class ODEPhysJax(eqx.Module):
         # register constant matrices
         # self.register_buffer("coeffMatrix1", torch.zeros(6, 6).float())
         # self.coeffMatrix1[3:, :3] = torch.eye(3).float()
-        self.vel_copy_mat = jnp.block(
-            [[jnp.zeros((3, 3)), jnp.eye(3)], [jnp.zeros((3, 6))]]
-        )
+        # self.vel_copy_mat = jnp.block(
+        #     [[jnp.zeros((3, 3)), jnp.eye(3)], [jnp.zeros((3, 6))]]
+        # )
         # self.register_buffer("coeffMatrix2", torch.zeros(6, 6).float())
         # self.coeffMatrix2[0:3, 3:] = -torch.diag(
         #     torch.tensor([1 / self.m, 1 / self.m, 1 / self.J])
@@ -842,7 +945,7 @@ class ODEPhysJax(eqx.Module):
     #         raise RuntimeError("boundary conditions not allowed")
     #     return gravityGrad
 
-    def __call__(self, t: jnp.ndarray, y: jnp.ndarray, args) -> jnp.ndarray:
+    def __call__(self, t: jnp.ndarray, y: jnp.ndarray, args=None) -> jnp.ndarray:
         grad = self.ODEFunc(y)
         # gravityGrad = self.construct_g(y)
         # if grad is not None:
@@ -864,7 +967,24 @@ class ODEPhysJax(eqx.Module):
         return dy_dt
 
 
+def get_eqx_model_state(model: eqx.Module, filter_spec=eqx.is_array) -> List:
+    tree_weights, tree_other = eqx.partition(model, filter_spec)
+    flattened_weights, _ = jtu.tree_flatten(tree_weights)
+    return flattened_weights
+
+
+def set_eqx_model_state(
+    model: eqx.Module, weights: List, filter_spec=eqx.is_array
+) -> eqx.Module:
+    tree_weights, tree_other = eqx.partition(model, filter_spec)
+    tree_def = jtu.tree_structure(tree_weights)
+    loaded_weights = jtu.tree_unflatten(tree_def, weights)
+    return eqx.combine(loaded_weights, tree_other)
+
+
 class SlinkyTrajectoryRegressor(pl.LightningModule):
+    model: eqx.Module
+
     def __init__(
         self,
         dim_per_layer: int,
@@ -907,11 +1027,12 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         #     Boundaries=(1, 1),
         #     key=net_key,
         # )
-        self.net = ODEFuncQuadratic(True, (1, 1), key=net_key)
+        # self.net = ODEFuncQuadratic(False, (1, 1), key=net_key)
+        self.net = ODEFuncJax(32, 5, (1, 1), key=net_key)
 
         if pretrained_net:
             print("loading " + pretrained_net)
-            self._load_pretrained_net(self.net, pretrained_net)
+            self._load_checkpoint(self.net, pretrained_net)
             print("loading " + pretrained_net + " done")
 
         self.model = ODEPhysJax(self.net, Boundaries=(1, 1))
@@ -930,6 +1051,10 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         self.mse = lambda x, y: jnp.mean((x - y) ** 2)
         self.length_scaling = length_scaling
         self.loss_coord_frame = loss_coord_frame
+
+        self.forward_backward: Callable = eqx.filter_value_and_grad(
+            self.forward, arg=self.model.get_trainable_filter()
+        )
 
     @staticmethod
     def add_argparse_args(parent_parser):
@@ -996,6 +1121,36 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             choices=["global", "douglas"],
             default="global",
         )
+        parser.add_argument(
+            "--grad_clip_norm", type=float, default=None, help="Gradient clipping norm"
+        )
+        parser.add_argument(
+            "--init_lr", type=float, default=0, help="Initial learning rate"
+        )
+        parser.add_argument(
+            "--warmup_steps", type=int, default=50, help="Number of warmup steps"
+        )
+        parser.add_argument(
+            "--peak_lr", type=float, default=1e-2, help="Peak learning rate"
+        )
+        parser.add_argument(
+            "--decay_steps",
+            type=int,
+            default=20000,
+            help="Number of decay steps. If None, use the number of steps in the dataset.",
+        )
+        parser.add_argument(
+            "--end_lr", type=float, default=0.0, help="End learning rate"
+        )
+        parser.add_argument(
+            "--max_timeframes",
+            type=int,
+            default=10,
+            help="Max number of time steps in a sequence. When the "
+            "length of input sequences exceeds this value, "
+            "downsampling is performed to cap the input length to "
+            "the model.",
+        )
         return parent_parser
 
     # def _kinetic_function(self, t, x):
@@ -1036,7 +1191,6 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         return output, regularization
 
     def inference(self, x0, t, method):
-        print(self.model.ODEFuncJax)
         return self._solve_dynamics(self.model, x0, t, method)[0]
 
     def criterion(self, x, y):
@@ -1064,11 +1218,6 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             saveat=saveat,
             stepsize_controller=stepsize_controller,
         )
-        # pred_y = diffrax.diffeqsolve(
-        #     fun, start, t, atol=self.atol, rtol=self.rtol, method=method, **kwargs
-        # )
-        # print(f"{start.shape=}")
-        # print(f"{pred_y.shape=}")
         pred_y = sol.ys
         return pred_y
 
@@ -1119,10 +1268,6 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         #     "kinetic_regularization": regularization,
         # }
 
-    forward_backward: Callable = staticmethod(
-        eqx.filter_value_and_grad(forward.__func__)
-    )
-
     @eqx.filter_jit
     def _training_step(
         self,
@@ -1132,7 +1277,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         true_output,
         key: jrandom.KeyArray,
         opt_state: optax.OptState,
-    ):
+    ) -> Tuple[jnp.ndarray, eqx.Module, optax.OptState]:
         loss, grad = self.forward_backward(
             self.model,
             self._solve_dynamics,
@@ -1154,38 +1299,77 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             self.model.ODEFunc.c_dxi.tolist(),
             prog_bar=True,
             logger=True,
-            # batch_size=batch[0]["time"].shape[0],
         )
         self.log(
             "dxi2",
             jnp.exp(self.model.ODEFunc.c_log_dxi2).tolist(),
             prog_bar=True,
             logger=True,
-            # batch_size=batch[0]["time"].shape[0],
         )
         self.log(
             "dz2",
             jnp.exp(self.model.ODEFunc.c_log_dz2).tolist(),
             prog_bar=True,
             logger=True,
-            # batch_size=batch[0]["time"].shape[0],
         )
         self.log(
             "dphi2",
             jnp.exp(self.model.ODEFunc.c_log_dphi2).tolist(),
             prog_bar=True,
             logger=True,
-            # batch_size=batch[0]["time"].shape[0],
         )
 
-    def training_step(self, batch, batch_idx):
-        key, self.key = jrandom.split(self.key)
+    def visualize_batch(self, batch_gt, batch_pred, dt):
+        for i, (gt, pred) in enumerate(zip(batch_gt, batch_pred)):
+            anim = animate_2d_slinky_trajectories(
+                np.stack([gt, pred], axis=0), dt, animation_slice=min(100, gt.shape[0])
+            )
+            buffer = io.StringIO()
+            anim.write_html(buffer, full_html=False)
+            anim_html = buffer.getvalue()
+            wandb.log({f"train_anim/{i}": wandb.Html(anim_html, inject=False)})
 
+    @staticmethod
+    def _downsample_indices_random(total, n_samples, key):
+        return jrandom.permutation(key, total)[:n_samples]
+
+    @staticmethod
+    def _downsample_indices_regular(total, n_samples):
+        return jnp.arange(total)[:: (total // n_samples)][:n_samples]
+
+    @staticmethod
+    def _downsample_indices_even(total, n_samples):
+        max_index = total - 1
+        n_intervals = n_samples - 1
+        interval, remainder = divmod(max_index, n_intervals)
+        indices = np.cumsum((np.arange(n_intervals) < remainder).astype(int) + interval)
+        return jnp.concatenate((jnp.zeros(1, dtype="int32"), indices))
+
+    def _downsample_indices(self, total, n_samples):
+        if total < n_samples:
+            return jnp.arange(total)
+        else:
+            return self._downsample_indices_even(total, n_samples)
+
+    def assemble_input_output(self, batch):
         input, true_output = (
             jnp.asarray(batch[0]["state"]),
             jnp.asarray(batch[1]["state"]),
         )
-        time = jnp.concatenate([batch[0]["time"], batch[1]["time"]], axis=1)
+        # print(f"{true_output.shape=}")
+        # print(f"{self.hparams.max_timeframes=}")
+        time_inds = self._downsample_indices(true_output.shape[1], self.hparams.max_timeframes)
+        true_output = true_output[:, time_inds]
+        time = jnp.concatenate([batch[0]["time"], batch[1]["time"][:, time_inds]], axis=1)
+        # print(f"{input.shape=}")
+        # print(f"{true_output.shape=}")
+        # print(f"{time.shape=}")
+        return input, true_output, time
+
+    def training_step(self, batch, batch_idx):
+        key, self.key = jrandom.split(self.key)
+
+        input, true_output, time = self.assemble_input_output(batch)
 
         loss, self.model, self.opt_state = self._training_step(
             input, time, true_output, key, self.opt_state
@@ -1205,8 +1389,15 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             batch_size=batch[0]["time"].shape[0],
         )
 
-        self.log_params()
+        # self.log_params()
 
+        self.log(
+            "lr",
+            self.opt_state.hyperparams["learning_rate"].tolist(),
+            prog_bar=True,
+            logger=True,
+            # batch_size=batch[0]["time"].shape[0],
+        )
         # self.log("train_mse", mse, prog_bar=True, logger=True)
         # if self.kinetic_reg:
         #     self.log(
@@ -1235,12 +1426,9 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
     #     self.pbar.set_postfix(self.metrics)
     #     # if prog_bar and self.progress_bar_callback is not None:
     #     #     self.progress_bar_callback.add_metric(name, value)
-        
 
     def validation_step(self, batch, batch_idx):
-        input, true_output = batch[0]["state"], batch[1]["state"]
-        # print(f"{true_output.shape=}")
-        time = jnp.concatenate([batch[0]["time"], batch[1]["time"]], axis=1)
+        input, true_output, time = self.assemble_input_output(batch)
         key, self.key = jrandom.split(self.key)
         loss = self.forward(
             self.model,
@@ -1261,15 +1449,21 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             loss.tolist(),
             prog_bar=True,
             logger=True,
-            batch_size=input.shape[0],
+            batch_size=time.shape[0],
+        )
+        self.log(
+            "avg_val_loss",
+            loss.tolist() / time.shape[1],
+            prog_bar=False,
+            logger=True,
+            batch_size=time.shape[0],
         )
         # for n, p in self.named_parameters():
         # self.log(f"params/{n}", p, prog_bar=False, logger=True)
         return loss
 
     def test_step(self, batch, batch_idx):
-        input, true_output = batch[0]["state"], batch[1]["state"]
-        time = jnp.concatenate([batch[0]["time"], batch[1]["time"]], axis=1)
+        input, true_output, time = self.assemble_input_output(batch)
         key, self.key = jrandom.split(self.key)
         loss = self.forward(
             self.model,
@@ -1295,22 +1489,40 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        # return torch.optim.AdamW(self.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        # return torch.optim.Adam(
-        #     # return torch.optim.SGD(
-        #     self.parameters(),
-        #     lr=self.hparams.lr,
-        #     weight_decay=self.hparams.weight_decay,
-        # )
-        # self.optimizer = optax.adamw(
-        #     learning_rate=self.hparams.lr, weight_decay=self.hparams.weight_decay
-        # )
-        self.optimizer = optax.adabelief(learning_rate=self.hparams.lr)
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=self.hparams.init_lr,
+            peak_value=self.hparams.peak_lr,
+            warmup_steps=self.hparams.warmup_steps,
+            decay_steps=self.hparams.decay_steps,
+            end_value=self.hparams.end_lr,
+        )
+
+        def make_optimizer(grad_clip_norm, learning_rate, weight_decay):
+            optimizer_pipeline = []
+            if grad_clip_norm is not None:
+                optimizer_pipeline.append(optax.clip_by_global_norm(grad_clip_norm))
+            optimizer_pipeline.append(
+                optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+            )
+            return optax.chain(*optimizer_pipeline)
+
+        self.optimizer = optax.inject_hyperparams(make_optimizer)(
+            self.hparams.grad_clip_norm, schedule, self.hparams.weight_decay
+        )
+
+        # self.optimizer = optax.adabelief(learning_rate=self.hparams.lr)
         self.opt_state = self.optimizer.init(eqx.filter(self.model, eqx.is_array))
         return None
 
-    def _load_pretrained_net(self, net, pretrained_checkpoint: str):
-        raise NotImplementedError
+    def load_state_dict(self, state_dict: List, strict: bool = True):
+        set_eqx_model_state(self.model, state_dict, eqx.is_array)
+
+    def state_dict(self) -> List:
+        return get_eqx_model_state(self.model, eqx.is_array)
+
+    def _load_checkpoint(self, net, pretrained_checkpoint: str):
+        return eqx.tree_deserialise_leaves(pretrained_checkpoint, net)
+        # raise NotImplementedError
         try:
             import pretrain_lightning
 
@@ -1395,25 +1607,21 @@ class ClipLengthStepper(pl.Callback):
 #         self.counter = (self.counter + 1) % self.freq
 
 
-# # class ClipLengthStepper(pl.Callback):
-# #     def __init__(self, freq: int, max_len: int) -> None:
-# #         super().__init__()
-# #         self.freq: int = freq
-# #         self.max_len: int = max_len
-# #         self.counter = 0
+# class EquinoxCheckpoint(ModelCheckpoint):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
 
-# #     def on_train_epoch_end(
-# #         self, trainer: pl.Trainer, pl_module: pl.LightningModule
-# #     ) -> None:
-# #         self.counter = (self.counter + 1) % self.freq
-# #         if (
-# #             self.counter == 0
-# #             and trainer.train_dataloader.dataset.datasets.target_length < self.max_len
-# #         ):
-# #             trainer.train_dataloader.dataset.datasets.target_length += 1
-# #             trainer.val_dataloaders[0].dataset.target_length += 1
-# #             # trainer.test_dataloaders[0].dataset.target_length += 1
-# #         return
+#     def _save_model(self, filepath: str) -> None:
+#         # save model and optimizer state
+#         eqx.tree_serialise_leaves(filepath, self._trainer.model)
+#         # save other states
+#         self._save_function(filepath, self._trainer, self._trainer.lightning_module)
+
+#     def _load_model(self, filepath: str) -> None:
+#         # load model and optimizer state
+#         eqx.tree_deserialise_leaves(filepath, self._trainer.model)
+#         # load other states
+#         self._load_function(filepath, self._trainer, self._trainer.lightning_module)
 
 
 def read_data(
@@ -1459,7 +1667,7 @@ def read_data(
     )
 
 
-if True or __name__ == "__main__":
+if __name__ == "__main__":
     parser = configargparse.ArgumentParser(
         default_config_files=["node_default_config.yaml"],
         config_file_parser_class=configargparse.YAMLConfigFileParser,
@@ -1543,15 +1751,16 @@ if True or __name__ == "__main__":
     else:
         logger = WandbLogger(args.name, project=args.project_name, mode="disabled")
 
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=os.path.join("checkpoints", wandb.run.name),
-    #     # filename="best-checkpoint",
-    #     save_top_k=1,
-    #     save_last=True,
-    #     verbose=True,
-    #     monitor="val_mse",
-    #     mode="min",
-    # )
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join("jax_checkpoints", wandb.run.name),
+        # filename="best-checkpoint",
+        save_top_k=3,
+        save_last=True,
+        verbose=True,
+        monitor="avg_val_loss",
+        mode="min",
+    )
+    # checkpoint_callback =
 
     # early_stopping_callback = EarlyStopping(monitor="val_loss", patience=4)
 
@@ -1563,7 +1772,7 @@ if True or __name__ == "__main__":
         enable_checkpointing=True,
         reload_dataloaders_every_n_epochs=1,
         callbacks=[
-            # checkpoint_callback,
+            checkpoint_callback,
             # early_stopping_callback,
             # ClipLengthStepper(freq=args.incr_freq, max_len=args.max_length),
             ClipLengthStepper(**vars(args)),
@@ -1593,7 +1802,11 @@ if True or __name__ == "__main__":
 
     true_trajectory = slinky_data["state"].reshape(-1, num_cycles, 2, 3)[1:, :, 0, :]
 
+    print(f"{start_point.shape=}")
+    print(f"{evaluate_time.shape=}")
     output = model.inference(start_point, evaluate_time[None, :], method="dopri5")
+
+    print(jnp.linalg.norm(model.model(None, slinky_data["state"]), axis=-1)[-10:])
     # output = result["output"]
     output = np.squeeze(output)
 
@@ -1614,6 +1827,7 @@ if True or __name__ == "__main__":
     # torch.save(true_trajectory[1:], "true_trajectory.pth")
 
     wandb.log({"evaluate_animation": wandb.Html(evaluate_animation_html, inject=False)})
+    eqx.tree_serialise_leaves("jax_quadratic_model.ckpt", model.model)
 
 # m = ODEFuncJax(32, 5, key=jrandom.PRNGKey(42))
 # train_dataloader = data_module.train_dataloader()
