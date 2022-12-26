@@ -1,6 +1,6 @@
 import os
 from random import choices
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Literal, Optional, Tuple
 
 import configargparse
 import numpy as np
@@ -982,6 +982,66 @@ def set_eqx_model_state(
     return eqx.combine(loaded_weights, tree_other)
 
 
+class StreamOutlierMeter:
+    quantile_threshold: float
+    direction: Tuple[Literal["above", "below", "both"]]
+    mode: Tuple[Literal["original"], Literal["diff"]]
+    history_length: Optional[int]
+
+    def __init__(
+        self,
+        quantile_threshold: float,
+        direction: Tuple[Literal["above", "below", "both"]],
+        mode: Tuple[Literal["original"], Literal["diff"], Literal["ema"]] = "original",
+        ema_coef: float = 0.8,
+        history_length: Optional[int] = None,
+    ):
+        self.quantile_threshold = quantile_threshold
+        self.direction = direction
+        self.mode = mode
+        if history_length and history_length < 1:
+            raise ValueError(
+                f"history_length must be at least 1 (got {history_length})"
+            )
+        self.history_length = history_length
+        self._history = []
+        self._ptr = -1
+        self._previous = 0
+        self.ema_coef = ema_coef
+        self._ema_accumulation = 1
+
+    def add(self, x) -> bool:
+        diff = x - self._previous
+        if self.mode == "diff":
+            self._previous = x
+        elif self.mode == "ema":
+            self._ema_accumulation *= self.ema_coef
+            self._previous = (
+                self.ema_coef * self._previous + (1 - self.ema_coef) * x
+            )  # / (1-self._ema_accumulation)
+        x = diff
+
+        is_outlier = False
+        if not self._history:
+            is_outlier = True
+        else:
+            if self.direction in ["above", "both"]:
+                is_outlier |= x > np.quantile(
+                    self._history, 1 - self.quantile_threshold
+                )
+            if self.direction in ["below", "both"]:
+                is_outlier |= x < np.quantile(self._history, self.quantile_threshold)
+
+        if self.history_length and len(self._history) == self.history_length:
+            self._ptr = (self._ptr + 1) % self.history_length
+            self._history[self._ptr] = x
+        else:
+            self._history.append(x)
+            self._ptr += 1
+
+        return is_outlier
+
+
 class SlinkyTrajectoryRegressor(pl.LightningModule):
     model: eqx.Module
 
@@ -1054,6 +1114,10 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
 
         self.forward_backward: Callable = eqx.filter_value_and_grad(
             self.forward, arg=self.model.get_trainable_filter()
+        )
+
+        self.val_loss_outlier_meter = StreamOutlierMeter(
+            0.01, "above", mode="ema", ema_coef=0.8, history_length=100
         )
 
     @staticmethod
@@ -1319,15 +1383,20 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             logger=True,
         )
 
-    def visualize_batch(self, batch_gt, batch_pred, dt):
+    def log_batch_visualization(self, batch_gt, batch_pred, dt, log_prefix):
         for i, (gt, pred) in enumerate(zip(batch_gt, batch_pred)):
+            # print(f"{gt.shape=}")
+            # print(f"{pred.shape=}")
             anim = animate_2d_slinky_trajectories(
-                np.stack([gt, pred], axis=0), dt, animation_slice=min(100, gt.shape[0])
+                np.stack([gt[..., :3], pred[..., :3]], axis=0),
+                dt,
+                animation_slice=min(100, gt.shape[0]),
             )
             buffer = io.StringIO()
             anim.write_html(buffer, full_html=False)
             anim_html = buffer.getvalue()
-            wandb.log({f"train_anim/{i}": wandb.Html(anim_html, inject=False)})
+
+            wandb.log({f"{log_prefix}/{i}": wandb.Html(anim_html, inject=False)})
 
     @staticmethod
     def _downsample_indices_random(total, n_samples, key):
@@ -1358,9 +1427,13 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         )
         # print(f"{true_output.shape=}")
         # print(f"{self.hparams.max_timeframes=}")
-        time_inds = self._downsample_indices(true_output.shape[1], self.hparams.max_timeframes)
+        time_inds = self._downsample_indices(
+            true_output.shape[1], self.hparams.max_timeframes
+        )
         true_output = true_output[:, time_inds]
-        time = jnp.concatenate([batch[0]["time"], batch[1]["time"][:, time_inds]], axis=1)
+        time = jnp.concatenate(
+            [batch[0]["time"], batch[1]["time"][:, time_inds]], axis=1
+        )
         # print(f"{input.shape=}")
         # print(f"{true_output.shape=}")
         # print(f"{time.shape=}")
@@ -1458,6 +1531,16 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             logger=True,
             batch_size=time.shape[0],
         )
+        is_outlier = self.val_loss_outlier_meter.add(loss.tolist())
+        if is_outlier:
+            pred = self.inference(input[:, 0], time, "dopri5")
+            # print(f"{input.shape=}")
+            # print(f"{time.shape=}")
+            # print(f"{true_output.shape=}")
+            # print(f"{pred.shape=}")
+            self.log_batch_visualization(
+                true_output, pred, np.diff(time).mean(), "val_outlier_vis"
+            )
         # for n, p in self.named_parameters():
         # self.log(f"params/{n}", p, prog_bar=False, logger=True)
         return loss
