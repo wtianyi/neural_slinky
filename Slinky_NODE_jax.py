@@ -60,6 +60,8 @@ warnings.filterwarnings(
     "ignore", ".*`LightningModule\.configure_optimizers` returned `None`.*"
 )
 
+# jax.config.update("jax_enable_x64", True)
+
 
 def animate_2d_slinky_trajectories(
     trajectories: np.ndarray, dt: float, animation_slice=100
@@ -378,12 +380,13 @@ class DenseBlock(eqx.Module):
     layers: List[eqx.Module]
 
     def __init__(self, dim_per_layer, num_layers, *, key):
-        # super(DenseBlock, self).__init__()
         self.dim_per_layer = dim_per_layer
         self.num_layers = num_layers
 
         layer_keys = jrandom.split(key, num_layers)
         layers = []
+
+        beta = 1e1
         for i, k in enumerate(layer_keys):
             layers.append(
                 eqx.nn.Sequential(
@@ -393,17 +396,13 @@ class DenseBlock(eqx.Module):
                             dim_per_layer,
                             key=k,
                         ),
-                        eqx.nn.Lambda(jax.nn.softplus),
+                        eqx.nn.Lambda(lambda x: 1 / beta * jnp.logaddexp(beta * x, 0)),
                     ]
                 )
             )
         self.layers = layers
-        # self.net = eqx.nn.Sequential(layer)
 
     def __call__(self, x, *, key=None):
-        # def f(carry, block):
-        #     output = block(carry)
-        #     return output, jnp.concatenate((carry, output), axis=-1)
         for block in self.layers:
             y = block(x)
             x = jnp.concatenate((x, y), axis=-1)
@@ -458,9 +457,11 @@ class ODEFuncJax(eqx.Module):
                 torch.Tensor: Shape of (n_batch x (n_cycles-2) x 9). The last axis is
                 (x_1, y_1, alpha_1, x_2, y_2, alpha_2, x_3, y_3, alpha_3)
         """
-        x_prev = x[..., :-2, :]
+        # x_prev = x[..., :-2, :]
+        x_prev = jax.lax.stop_gradient(x[..., :-2, :])
         x_mid = x[..., 1:-1, :]
-        x_next = x[..., 2:, :]
+        # x_next = x[..., 2:, :]
+        x_next = jax.lax.stop_gradient(x[..., 2:, :])
         return jnp.concatenate((x_prev, x_mid, x_next), axis=-1)
 
     @staticmethod
@@ -469,7 +470,8 @@ class ODEFuncJax(eqx.Module):
     ) -> Float[Array, "*batchcycles 6"]:
         # data is a 6-dim input vector
         # the output is a 6-dim vector, as the mirror of input data with respect to the x-axis
-        new_data = data * jnp.array([1, -1, -1, 1, -1, -1])
+        # new_data = data * jnp.array([1, -1, -1, 1, -1, -1])
+        new_data = data * jnp.array([-1, 1, -1, -1, 1, -1])
         return new_data
 
     @staticmethod
@@ -499,11 +501,17 @@ class ODEFuncJax(eqx.Module):
         # the output is a 6-dim vector, as the 180 degrees rotation of input data
         new_data = jnp.stack(
             [
-                data[..., 3],
-                data[..., 4],
+                # data[..., 3],
+                # data[..., 4],
+                # -data[..., 5],
+                # data[..., 0],
+                # data[..., 1],
+                # -data[..., 2],
+                -data[..., 3],
+                -data[..., 4],
                 -data[..., 5],
-                data[..., 0],
-                data[..., 1],
+                -data[..., 0],
+                -data[..., 1],
                 -data[..., 2],
             ],
             axis=-1,
@@ -644,6 +652,82 @@ class ODEFuncJax(eqx.Module):
         second_pair = jnp.stack([dxi_2, dz_2, dphi_2], axis=-1)
         return jnp.stack([first_pair, second_pair], axis=-2)  # (... x 2 x 3)
 
+    @staticmethod
+    def removeRigidBodyMotion(
+        data: Float[Array, "*batchcycles 9"]
+    ) -> Float[Array, "*batchcycles 6"]:
+        BA1 = (data[..., 2] + data[..., 5]) / 2
+        BA2 = (data[..., 5] + data[..., 8]) / 2
+
+        col1 = jnp.cos(BA1) * (data[..., 3] - data[..., 0]) + jnp.sin(BA1) * (
+            data[..., 4] - data[..., 1]
+        )  # xi_1
+        col2 = -jnp.sin(BA1) * (data[..., 3] - data[..., 0]) + jnp.cos(BA1) * (
+            data[..., 4] - data[..., 1]
+        )  # eta_1
+        col3 = data[..., 5] - data[..., 2]  # theta_1
+        col4 = jnp.cos(BA2) * (data[..., 6] - data[..., 3]) + jnp.sin(BA2) * (
+            data[..., 7] - data[..., 4]
+        )  # xi_2
+        col5 = -jnp.sin(BA2) * (data[..., 6] - data[..., 3]) + jnp.cos(BA2) * (
+            data[..., 7] - data[..., 4]
+        )  # eta_2
+        col6 = data[..., 8] - data[..., 5]  # theta_2
+        return jnp.stack((col1, col2, col3, col4, col5, col6), axis=-1)
+
+    @staticmethod
+    def transform_douglas_to_cartesian_alpha(
+        douglas_coords: Float[Array, "*batchcycles 2 3"]
+    ) -> Float[Array, "*batchcycles 9"]:
+        """
+        Args:
+            douglas_coords: Pairs of douglas coordinate sets
+                representing triplets of cycles. The last axis is (dxi, dz, dphi)
+        Returns:
+            cartesian_alpha_coords: The columns are
+                (center_x_1, center_z_1, alpha_1, center_x_2, center_z_2, alpha_2, ...)
+        """
+        dxi_1 = douglas_coords[..., 0, 0]
+        dz_1 = douglas_coords[..., 0, 1]
+        dphi_1 = douglas_coords[..., 0, 2]
+
+        dxi_2 = douglas_coords[..., 1, 0]
+        dz_2 = douglas_coords[..., 1, 1]
+        dphi_2 = douglas_coords[..., 1, 2]
+
+        beta_1 = jnp.arctan2(dz_1, dxi_1)
+        beta_2 = jnp.arctan2(dz_2, dxi_2)
+
+        alpha_1 = 0.5 * jnp.pi - 0.5 * dphi_1 - beta_1
+        alpha_2 = 0.5 * jnp.pi + 0.5 * dphi_1 - beta_1
+
+        alpha_2_2 = 0.5 * jnp.pi - 0.5 * dphi_2 - beta_2
+        alpha_3 = 0.5 * jnp.pi + 0.5 * dphi_2 - beta_2
+        theta = jax.lax.stop_gradient(alpha_2_2 - alpha_2)
+        alpha_3 -= theta
+
+        l1 = jnp.sqrt(dxi_1**2 + dz_1**2)
+        l2 = jnp.sqrt(dxi_2**2 + dz_2**2)
+
+        center_1 = jnp.stack([jax.lax.stop_gradient(l1) - l1, jnp.zeros_like(l1)], axis=-1)
+        center_2 = jnp.stack([l1, jnp.zeros_like(l1)], axis=-1)
+        center_3 = jnp.stack(
+            [jax.lax.stop_gradient(l1) + l2 * jnp.cos(theta), -l2 * jnp.sin(theta)],
+            axis=-1,
+        )
+
+        return jnp.concatenate(
+            [
+                center_1,
+                alpha_1[..., None],
+                center_2,
+                alpha_2[..., None],
+                center_3,
+                alpha_3[..., None],
+            ],
+            axis=-1,
+        )
+
     def preprocessing(self, coords: jnp.ndarray) -> jnp.ndarray:
         triplet_alpha_node_pos = self._make_triplet_catesian_alpha(coords)
         ############################# CONVERSION ##############################
@@ -653,11 +737,13 @@ class ODEFuncJax(eqx.Module):
         ########################### END CONVERSION ############################
 
         # ############################## TEMPORARY ##############################
-        triplet_coords = self.transform_cartesian_alpha_to_douglas(
-            triplet_alpha_node_pos
-            # coords_transform.transform_triplet_to_cartesian_alpha(triplet_coords)
-        )
-        triplet_coords = triplet_coords.reshape(triplet_coords.shape[:-2] + (-1,))
+        # triplet_alpha_node_pos = triplet_alpha_node_pos.at[...,[2,5,8]].add(0.5 * jnp.pi)
+        # triplet_coords = self.transform_cartesian_alpha_to_douglas(
+        #     triplet_alpha_node_pos
+        #     # coords_transform.transform_triplet_to_cartesian_alpha(triplet_coords)
+        # )
+        # triplet_coords = triplet_coords.reshape(triplet_coords.shape[:-2] + (-1,))
+        triplet_coords = self.removeRigidBodyMotion(triplet_alpha_node_pos)
         # ############################ END TEMPORARY ############################
 
         augmented_x = jnp.stack(
@@ -694,6 +780,7 @@ class ODEFuncJax(eqx.Module):
         shape_prefix = augmented_x.shape[:-1]
         out = f(
             augmented_x.reshape(-1, augmented_x.shape[-1])
+            * jnp.array([1e3, 1e3, 1e1, 1e3, 1e3, 1e1])
             # * torch.tensor([1e3, 1e3, 1e1, 1e3, 1e3, 1e1]).to(augmented_x.device)
             # * torch.tensor([1e3, 1e3, 1e1, 1e1, 1e1, 1e1]).type_as(augmented_x)
             # * torch.tensor([1e3, 1e3, 1e1, 1e3, 1e3, 1e1]).type_as(augmented_x)
@@ -951,8 +1038,8 @@ class ODEPhysJax(eqx.Module):
         # if grad is not None:
         # the dimensions of the return value are (num_samples, num_cycles, 6)
         # dy_dt = jnp.einsum("...i,ij->...j", y, self.vel_copy_mat)
-        # a = jnp.einsum("...i,i->...i", -grad, self.inv_inertia)
-        a = -grad
+        a = jnp.einsum("...i,i->...i", -grad, self.inv_inertia)
+        # a = -grad
         # dy_dt = dy_dt.at[..., -3:].add(a)
         dy_dt = jnp.concatenate([y[..., -3:], a], axis=-1)
 
@@ -1060,6 +1147,11 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         pretrained_net: Optional[str] = None,
         length_scaling: float = 1,
         loss_coord_frame: str = "global",
+        init_lr: float = 0,
+        peak_lr: float = 1e-2,
+        warmup_steps: int = 50,
+        decay_steps: int = 20000,
+        end_lr: float = 0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -1117,7 +1209,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         )
 
         self.val_loss_outlier_meter = StreamOutlierMeter(
-            0.01, "above", mode="ema", ema_coef=0.8, history_length=100
+            0.001, "above", mode="ema", ema_coef=0.8, history_length=1000
         )
 
     @staticmethod
@@ -1270,6 +1362,8 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
     ) -> jnp.ndarray:
         term = diffrax.ODETerm(fun)
         solver = diffrax.Dopri5()
+        # solver = diffrax.Heun()
+        # solver = diffrax.Kvaerno5()
         saveat = diffrax.SaveAt(ts=t)
         stepsize_controller = diffrax.PIDController(rtol=self.rtol, atol=self.atol)
         sol = diffrax.diffeqsolve(
@@ -1281,6 +1375,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             y0=start,
             saveat=saveat,
             stepsize_controller=stepsize_controller,
+            max_steps=8192,
         )
         pred_y = sol.ys
         return pred_y
@@ -1354,6 +1449,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             key=key,
         )
         updates, next_opt_state = self.optimizer.update(grad, opt_state, self.model)
+        # return loss, updates, next_opt_state
         model = eqx.apply_updates(self.model, updates)
         return loss, model, next_opt_state
 
@@ -1445,8 +1541,20 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         input, true_output, time = self.assemble_input_output(batch)
 
         loss, self.model, self.opt_state = self._training_step(
-            input, time, true_output, key, self.opt_state
+            # loss, updates, self.opt_state = self._training_step(
+            input,
+            time,
+            true_output,
+            key,
+            self.opt_state,
         )
+        # self.model = eqx.apply_updates(self.model, updates)
+        # self.log(
+        #     "update_norm",
+        #     sum([jnp.linalg.norm(update) for update in get_eqx_model_state(updates)]).tolist(),
+        #     prog_bar=True,
+        #     logger=True,
+        # )
         self.log(
             "train_loss",
             loss.tolist(),
@@ -1585,7 +1693,9 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             if grad_clip_norm is not None:
                 optimizer_pipeline.append(optax.clip_by_global_norm(grad_clip_norm))
             optimizer_pipeline.append(
-                optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+                # optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+                optax.sgd(learning_rate=learning_rate)
+                # optax.adabelief(learning_rate=learning_rate)
             )
             return optax.chain(*optimizer_pipeline)
 
@@ -1598,7 +1708,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         return None
 
     def load_state_dict(self, state_dict: List, strict: bool = True):
-        set_eqx_model_state(self.model, state_dict, eqx.is_array)
+        self.model = set_eqx_model_state(self.model, state_dict, eqx.is_array)
 
     def state_dict(self) -> List:
         return get_eqx_model_state(self.model, eqx.is_array)
@@ -1795,7 +1905,9 @@ if __name__ == "__main__":
         "--project_name", default="NeuralSlinky", type=str, help="Run name"
     )
 
-    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path")
+    parser.add_argument(
+        "--checkpoint_path", type=str, default=None, help="Checkpoint path"
+    )
     parser.add_argument(
         "--test_only",
         action="store_true",
@@ -1864,10 +1976,11 @@ if __name__ == "__main__":
         #     # fast_dev_run=True
     )
 
-    if args.checkpoint:
+    if args.checkpoint_path:
         model = SlinkyTrajectoryRegressor.load_from_checkpoint(
-            args.checkpoint  # , dim_per_layer=32, n_layers=5
+            **vars(args)  # , dim_per_layer=32, n_layers=5
         )
+        print(f"Loaded checkpoint from {args.checkpoint_path}")
         # model.load_state_dict(checkpoint.state_dict())
     else:
         model = SlinkyTrajectoryRegressor(**vars(args), key=jrandom.PRNGKey(args.seed))
