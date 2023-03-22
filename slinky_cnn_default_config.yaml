@@ -3,7 +3,7 @@ batch_size: 64
 min_epochs: 700
 gpus: 1
 gradient_clip_val: 0.5
-progress_bar_refresh_rate: 10
+# progress_bar_refresh_rate: 10
 
 lr: 0.0001
 weight_decay: 0

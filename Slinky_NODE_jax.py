@@ -19,6 +19,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 
 import wandb
+from neural_slinky import emlp_models_jax
 from neural_slinky import trajectory_dataset, coords_transform
 from neural_slinky.utils import (
     animate_2d_slinky_trajectories,
@@ -446,7 +447,7 @@ class ODEFuncJax(eqx.Module):
         self.boundaries = Boundaries
 
     @staticmethod
-    def _make_triplet_catesian_alpha(
+    def _make_triplet_cartesian_alpha(
         x: Float[Array, "*batch cycles 3"]
     ) -> Float[Array, "*batch cycles-2 9"]:
         """Convert slinky coords to overlapping triplet coords, differentiably
@@ -698,18 +699,20 @@ class ODEFuncJax(eqx.Module):
         beta_1 = jnp.arctan2(dz_1, dxi_1)
         beta_2 = jnp.arctan2(dz_2, dxi_2)
 
-        alpha_1 = 0.5 * jnp.pi - 0.5 * dphi_1 - beta_1
-        alpha_2 = 0.5 * jnp.pi + 0.5 * dphi_1 - beta_1
+        alpha_1 = -0.5 * dphi_1 - beta_1
+        alpha_2 = +0.5 * dphi_1 - beta_1
 
-        alpha_2_2 = 0.5 * jnp.pi - 0.5 * dphi_2 - beta_2
-        alpha_3 = 0.5 * jnp.pi + 0.5 * dphi_2 - beta_2
+        alpha_2_2 = -0.5 * dphi_2 - beta_2
+        alpha_3 = +0.5 * dphi_2 - beta_2
         theta = jax.lax.stop_gradient(alpha_2_2 - alpha_2)
         alpha_3 -= theta
 
         l1 = jnp.sqrt(dxi_1**2 + dz_1**2)
         l2 = jnp.sqrt(dxi_2**2 + dz_2**2)
 
-        center_1 = jnp.stack([jax.lax.stop_gradient(l1) - l1, jnp.zeros_like(l1)], axis=-1)
+        center_1 = jnp.stack(
+            [jax.lax.stop_gradient(l1) - l1, jnp.zeros_like(l1)], axis=-1
+        )
         center_2 = jnp.stack([l1, jnp.zeros_like(l1)], axis=-1)
         center_3 = jnp.stack(
             [jax.lax.stop_gradient(l1) + l2 * jnp.cos(theta), -l2 * jnp.sin(theta)],
@@ -728,7 +731,28 @@ class ODEFuncJax(eqx.Module):
             axis=-1,
         )
 
-    def preprocessing(self, coords: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def _mirror_cartesian_alpha_horizontal(
+        coords: Float[Array, "*batch cycles 3"]
+    ) -> Float[Array, "*batch cycles 3"]:
+        return coords.at[..., [1, 2]].multiply(-1)
+
+    @staticmethod
+    def _mirror_cartesian_alpha_vertical(
+        coords: Float[Array, "*batch cycles 3"]
+    ) -> Float[Array, "*batch cycles 3"]:
+        return coords.at[..., [0, 2]].multiply(-1)
+
+    @staticmethod
+    def _reverse_cycle_indices(
+        coords: Float[Array, "*batch cycles dim"]
+    ) -> Float[Array, "*batch cycles dim"]:
+        return coords[..., ::-1, :]
+
+    def preprocessing(
+        self, coords: Float[Array, "*batch cycles 3"]
+    ) -> Float[Array, "8 *batch cycles-2 6"]:
+        """
         triplet_alpha_node_pos = self._make_triplet_catesian_alpha(coords)
         ############################# CONVERSION ##############################
         # triplet_coords = self.transform_cartesian_alpha_to_triplet(
@@ -762,6 +786,77 @@ class ODEFuncJax(eqx.Module):
         )  # chirality module
         # augmented_x = self.augment_with_sin_cos(augmented_x)
         return augmented_x
+        """
+        h_reflected_coords = self._mirror_cartesian_alpha_horizontal(coords)
+        v_reflected_coords = self._mirror_cartesian_alpha_vertical(coords)
+        xy_reflected_coords = self._mirror_cartesian_alpha_horizontal(
+            v_reflected_coords
+        )
+        reverse_cycle_coords = self._reverse_cycle_indices(coords)
+        h_reflected_coords_reverse = self._mirror_cartesian_alpha_horizontal(
+            reverse_cycle_coords
+        )
+        v_reflected_coords_reverse = self._mirror_cartesian_alpha_vertical(
+            reverse_cycle_coords
+        )
+        xy_reflected_coords_reverse = self._mirror_cartesian_alpha_horizontal(
+            v_reflected_coords_reverse
+        )
+        # triplet_alpha_node_pos = self._make_triplet_catesian_alpha(
+        #     jnp.stack(
+        #         [coords, x_reflected_coords, y_reflected_coords, xy_reflected_coords],
+        #         axis=0,
+        #     )
+        # )
+        # triplet_alpha_node_pos = jnp.stack(
+        #     [
+        #         self._make_triplet_cartesian_alpha(coords),
+        #         self._make_triplet_cartesian_alpha(h_reflected_coords),
+        #         self._make_triplet_cartesian_alpha(v_reflected_coords),
+        #         self._make_triplet_cartesian_alpha(xy_reflected_coords),
+        #         self._make_triplet_cartesian_alpha(reverse_cycle_coords)[..., ::-1, :],
+        #         self._make_triplet_cartesian_alpha(h_reflected_coords_reverse)[
+        #             ..., ::-1, :
+        #         ],
+        #         self._make_triplet_cartesian_alpha(v_reflected_coords_reverse)[
+        #             ..., ::-1, :
+        #         ],
+        #         self._make_triplet_cartesian_alpha(xy_reflected_coords_reverse)[
+        #             ..., ::-1, :
+        #         ],
+        #     ],
+        # )
+        augmented_coords = self._make_triplet_cartesian_alpha(
+            jnp.stack(
+                [coords, h_reflected_coords, v_reflected_coords, xy_reflected_coords],
+                axis=0,
+            )
+        )
+        augmented_coords_reverse = self._reverse_cycle_indices(
+            self._make_triplet_cartesian_alpha(
+                jnp.stack(
+                    [
+                        reverse_cycle_coords,
+                        h_reflected_coords_reverse,
+                        v_reflected_coords_reverse,
+                        xy_reflected_coords_reverse,
+                    ],
+                    axis=0,
+                )
+            )
+        )
+        triplet_alpha_node_pos = jnp.concatenate(
+            [augmented_coords, augmented_coords_reverse], axis=0
+        )
+        triplet_coords = self.removeRigidBodyMotion(triplet_alpha_node_pos)
+        return triplet_coords
+
+    def non_symmetric_preprocessing(
+        self, coords: Float[Array, "*batch cycles 3"]
+    ) -> Float[Array, "8 *batch cycles-2 6"]:
+        triplet_alpha_node_pos = self._make_triplet_cartesian_alpha(coords)
+        triplet_coords = self.removeRigidBodyMotion(triplet_alpha_node_pos)
+        return triplet_coords
 
     def augment_with_sin_cos(self, x: jnp.ndarray) -> jnp.ndarray:
         return jnp.concatenate(
@@ -770,11 +865,8 @@ class ODEFuncJax(eqx.Module):
         )
 
     def cal_energy(self, coords: jnp.ndarray) -> jnp.ndarray:
-        # calculating the acceleration of the 2D slinky system
-        # the dimensions of y are (num_samples, num_cycles, [x_dis,y_dis,alpha_dis,x_vel,y_vel,alpha_vel])
-        # yp, ypp, ypa = self.construct_y(y)
-        # yinput = torch.cat((ypp,yp,ypa),-1)
-        augmented_x = self.preprocessing(coords)
+        # augmented_x = self.preprocessing(coords)
+        augmented_x = self.non_symmetric_preprocessing(coords)
         # print(augmented_x.shape)
         f = jax.vmap(self.net)
         shape_prefix = augmented_x.shape[:-1]
@@ -821,7 +913,8 @@ class ODEFuncJax(eqx.Module):
         # if grad is not None:
         # the dimensions of the return value are (num_samples, num_cycles, 6)
         # print(f"{grad=}")
-        return grad  # * torch.tensor([1e2, 1e2, 1]).type_as(grad)
+        # return grad  # * torch.tensor([1e2, 1e2, 1]).type_as(grad)
+        return grad  * jnp.array([1e2, 1e2, 1])
 
 
 @jaxtyped
@@ -849,11 +942,11 @@ class ODEFuncQuadratic(eqx.Module):
     def __init__(self, douglas: bool = False, Boundaries=(1, 1), *, key=None, **kwargs):
         super().__init__()
         self.c_dxi = jnp.array(0.0)
-        self.c_log_dxi2 = jnp.array(-5.0)
+        self.c_log_dxi2 = jnp.array(-0.675129)
         self.c_dz = jnp.array(0.0)
-        self.c_log_dz2 = jnp.array(-5.0)
+        self.c_log_dz2 = jnp.array(3.401197)
         self.c_dphi = jnp.array(0.0)
-        self.c_log_dphi2 = jnp.array(-5.0)
+        self.c_log_dphi2 = jnp.array(-6.907755)
         self.c_dxi_dz = jnp.array(0.0)
         self.c_dxi_dphi = jnp.array(0.0)
         self.c_dz_dphi = jnp.array(0.0)
@@ -1139,7 +1232,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         key: jrandom.KeyArray,
         kinetic_reg: float = 0,
         n_cycles_loss: int = 20,
-        # net_type: str = "ESNN",
+        net_type: str = "ESNN",
         lr: float = 1e-3,
         weight_decay: float = 0,
         odeint_method: str = "dopri5",
@@ -1156,7 +1249,20 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        # if net_type == "ESNN":
+        net_key, self.key = jrandom.split(key)
+        if net_type == "ESNN":
+            self.net = ODEFuncJax(
+                NeuronsPerLayer=dim_per_layer,
+                NumLayer=n_layers,
+                Boundaries=(1, 1),
+                key=net_key,
+            )
+            ######################### TEMP ##########################
+            net_weights = get_eqx_model_state(self.net)
+            scale = 1e-3
+            self.net = set_eqx_model_state(self.net, [scale * w for w in net_weights])
+            ####################### END TEMP ########################
+
         #     self.net = node_f.ODEFunc(
         #         NeuronsPerLayer=dim_per_layer, NumLayer=n_layers, Boundaries=(1, 1)
         #     )
@@ -1164,23 +1270,16 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         #     self.net = node_f.ODEFunc2(
         #         NeuronsPerLayer=dim_per_layer, NumLayer=n_layers, Boundaries=(1, 1)
         #     )
-        # elif net_type == "EMLP":
-        #     self.net = emlp_models.SlinkyForceODEFunc(
-        #         num_layers=n_layers, boundaries=(1, 1)
-        #     )
-        # elif net_type == "quadratic":
+        elif net_type == "EMLP":
+            self.net = emlp_models_jax.SlinkyForceODEFunc(
+                dim_per_layer=384, num_layers=3, boundaries=(1, 1), key=net_key
+            )
+        elif net_type == "quadratic":
+            self.net = ODEFuncQuadratic(True, (1, 1), key=net_key)
         #     self.net = node_f.ODEFuncQuadratic(douglas=True, Boundaries=(1, 1))
         #     # self.net = node_f.ODEFuncQuadratic(douglas=False, boundaries=(1, 1))
-        net_key, self.key = jrandom.split(key)
 
-        # self.net = ODEFuncJax(
-        #     NeuronsPerLayer=dim_per_layer,
-        #     NumLayer=n_layers,
-        #     Boundaries=(1, 1),
-        #     key=net_key,
-        # )
-        # self.net = ODEFuncQuadratic(False, (1, 1), key=net_key)
-        self.net = ODEFuncJax(32, 5, (1, 1), key=net_key)
+        # self.net = ODEFuncJax(32, 5, (1, 1), key=net_key)
 
         if pretrained_net:
             print("loading " + pretrained_net)
@@ -1274,7 +1373,7 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
         parser.add_argument(
             "--loss_coord_frame",
             type=str,
-            choices=["global", "douglas"],
+            choices=["global", "douglas", "local"],
             default="global",
         )
         parser.add_argument(
@@ -1349,6 +1448,16 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
     def inference(self, x0, t, method):
         return self._solve_dynamics(self.model, x0, t, method)[0]
 
+    # @staticmethod
+    # def recenter(
+    #     pos_vel: Float[Array, "*batch cycles 6"]
+    # ) -> Float[Array, "*batch cycles 6"]:
+    #     x_mean = jax.lax.stop_gradient(pos_vel[..., 0].mean(axis=-1, keepdims=True))
+    #     y_mean = jax.lax.stop_gradient(pos_vel[..., 1].mean(axis=-1, keepdims=True))
+    #     pos_vel = pos_vel.at[..., 0].add(-x_mean)
+    #     pos_vel = pos_vel.at[..., 1].add(-y_mean)
+    #     return pos_vel
+
     def criterion(self, x, y):
         if self.loss_coord_frame == "global":
             return jnp.mean(((x - y) * self.feat_weights) ** 2) / (
@@ -1356,6 +1465,10 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             )
         elif self.loss_coord_frame == "douglas":
             return jnp.mean((x - y) ** 2) / (self.length_scaling**2)
+        elif self.loss_coord_frame == "local":
+            return jnp.mean(((x - y) * self.feat_weights) ** 2) / (
+                self.length_scaling**2
+            )
 
     def _odeint(
         self, start: jnp.ndarray, t: jnp.ndarray, method: str, fun: Callable, **kwargs
@@ -1416,6 +1529,15 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             select_cycles = jrandom.permutation(key, input.shape[-2])[:n_cycles_loss]
             loss_output = output[..., select_cycles, :]
             loss_true_output = true_output[..., select_cycles, :]
+        elif loss_coord_frame == "local":
+            loss_output = jnp.concatenate([
+                output[..., :-2, :] - output[..., 1:-1, :],
+                output[..., 2:, :] - output[..., 1:-1, :],
+            ], axis=0)
+            loss_true_output = jnp.concatenate([
+                true_output[..., :-2, :] - true_output[..., 1:-1, :],
+                true_output[..., 2:, :] - true_output[..., 1:-1, :],
+            ], axis=0)
         loss = criterion(loss_output, loss_true_output)
         # if regularization:
         #     loss = loss + self.kinetic_reg * regularization
@@ -1693,8 +1815,9 @@ class SlinkyTrajectoryRegressor(pl.LightningModule):
             if grad_clip_norm is not None:
                 optimizer_pipeline.append(optax.clip_by_global_norm(grad_clip_norm))
             optimizer_pipeline.append(
-                # optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
-                optax.sgd(learning_rate=learning_rate)
+                # optax.rmsprop(learning_rate=learning_rate, nesterov=True)
+                optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+                # optax.sgd(learning_rate=learning_rate)
                 # optax.adabelief(learning_rate=learning_rate)
             )
             return optax.chain(*optimizer_pipeline)
@@ -1928,12 +2051,14 @@ if __name__ == "__main__":
     # training_cutoff = 65
 
     data_module = SlinkyDataModule(
-        [slinky_data[:training_cutoff]],
-        [slinky_data[training_cutoff:]],
+        [slinky_data[:26]] * 100,
+        [slinky_data[:26]],
+        # [slinky_data[:training_cutoff]],
+        # [slinky_data[training_cutoff:]],
         # [slinky_data[:training_cutoff]],
         input_length=1,
-        target_length=args.init_length,
-        val_length=args.val_length,
+        target_length=args.init_clip_len,
+        val_length=args.init_clip_len,
         batch_size=args.batch_size,
         perturb=args.perturb,  # .01
     )
@@ -1989,7 +2114,7 @@ if __name__ == "__main__":
         trainer.fit(model=model, datamodule=data_module)
         # model.fit(data_module, args.min_epochs)
 
-    start_point = slinky_data[0]["state"][None, None, :]
+    start_point = slinky_data[0]["state"][None, :]
     # print(start_point)
     # sys.exit()
     model.eval()
@@ -2023,7 +2148,7 @@ if __name__ == "__main__":
     # torch.save(true_trajectory[1:], "true_trajectory.pth")
 
     wandb.log({"evaluate_animation": wandb.Html(evaluate_animation_html, inject=False)})
-    eqx.tree_serialise_leaves("jax_quadratic_model.ckpt", model.model)
+    # eqx.tree_serialise_leaves("jax_quadratic_model.ckpt", model.model)
 
 # m = ODEFuncJax(32, 5, key=jrandom.PRNGKey(42))
 # train_dataloader = data_module.train_dataloader()

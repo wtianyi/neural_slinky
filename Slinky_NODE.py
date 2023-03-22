@@ -667,5 +667,7 @@ if __name__ == "__main__":
 
     torch.save(pred_trajectory, "pred_trajectory.pth")
     torch.save(true_trajectory[1:], "true_trajectory.pth")
+    np.save("pred_trajectory.npy", pred_trajectory.cpu().detach().numpy())
+    np.save("true_trajectory.npy", true_trajectory.cpu().detach().numpy())
 
     wandb.log({"evaluate_animation": wandb.Html(evaluate_animation_html, inject=False)})
